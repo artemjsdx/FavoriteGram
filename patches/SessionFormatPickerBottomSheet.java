@@ -21,19 +21,25 @@ package org.telegram.ui;
       private static final int REQUEST_SESSION_FILE = 9901;
       private final Context ctx;
 
+      /** Получить resource ID строки без импорта класса R */
+      private static int rid(Context ctx, String name) {
+          return ctx.getResources().getIdentifier(name, "string", ctx.getPackageName());
+      }
+
       public SessionFormatPickerBottomSheet(Context context, View parent) {
           super(context, false);
           this.ctx = context;
-          setTitle(LocaleController.getString("SessionImportTitle", R.string.SessionImportTitle), true);
+          setTitle(LocaleController.getString("SessionImportTitle", rid(context, "SessionImportTitle")), true);
+
           LinearLayout layout = new LinearLayout(context);
           layout.setOrientation(LinearLayout.VERTICAL);
           layout.setPadding(AndroidUtilities.dp(16), 0, AndroidUtilities.dp(16), AndroidUtilities.dp(16));
 
-          String[] labels = {
-              LocaleController.getString("SessionImportTelethon", R.string.SessionImportTelethon),
-              LocaleController.getString("SessionImportPyrogram", R.string.SessionImportPyrogram),
-              LocaleController.getString("SessionImportTdata",    R.string.SessionImportTdata),
-              LocaleController.getString("SessionImportJson",     R.string.SessionImportJson)
+          String[] labelKeys = {
+              "SessionImportTelethon",
+              "SessionImportPyrogram",
+              "SessionImportTdata",
+              "SessionImportJson"
           };
           SessionImportHelper.SessionFormat[] formats = {
               SessionImportHelper.SessionFormat.TELETHON,
@@ -42,10 +48,11 @@ package org.telegram.ui;
               SessionImportHelper.SessionFormat.JSON
           };
 
-          for (int i = 0; i < labels.length; i++) {
+          for (int i = 0; i < labelKeys.length; i++) {
               final SessionImportHelper.SessionFormat fmt = formats[i];
+              final String key = labelKeys[i];
               TextView row = new TextView(context);
-              row.setText(labels[i]);
+              row.setText(LocaleController.getString(key, rid(context, key)));
               row.setTextSize(16);
               row.setTextColor(Theme.getColor(Theme.key_dialogTextBlack));
               row.setPadding(AndroidUtilities.dp(8), AndroidUtilities.dp(14),
@@ -62,6 +69,10 @@ package org.telegram.ui;
       }
 
       private void openFilePicker(SessionImportHelper.SessionFormat format) {
+          if (format == SessionImportHelper.SessionFormat.TDATA) {
+              Toast.makeText(ctx, "TDATA: поддержка скоро появится", Toast.LENGTH_LONG).show();
+              return;
+          }
           Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
           intent.addCategory(Intent.CATEGORY_OPENABLE);
           intent.setType("*/*");
