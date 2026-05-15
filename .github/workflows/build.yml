@@ -174,7 +174,7 @@ jobs:
       - name: Build Debug APK
         run: |
           cd nagram
-          ./gradlew :TMessagesProj_App:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test
+          ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test
 
       - name: Find APKs
         run: find nagram -name "*.apk"
