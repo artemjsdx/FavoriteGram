@@ -1,132 +1,90 @@
 name: Build FavoriteGram APK
 
-  on:
-    push:
-      branches: [main]
-    workflow_dispatch:
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-  jobs:
-    build:
-      runs-on: ubuntu-latest
-      timeout-minutes: 90
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
 
-      steps:
-        - name: Checkout FavoriteGram repo
-          uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-        - name: Set up JDK 17
-          uses: actions/setup-java@v4
-          with:
-            java-version: '17'
-            distribution: 'temurin'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
 
-        - name: Clone Nagram source (shallow)
-          run: |
-            git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-            echo "=== Nagram structure ==="
-            ls nagram/
-            echo "=== submodules ==="
-            cat nagram/.gitmodules 2>/dev/null || echo "(no .gitmodules)"
+      - name: Clone Nagram
+        run: |
+          git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
+          ls nagram/
 
-        - name: Init submodules
-          run: |
-            cd nagram
-            git submodule update --init --recursive --depth=1 2>/dev/null || true
+      - name: Init submodules
+        run: cd nagram && git submodule update --init --recursive --depth=1 2>/dev/null || true
 
-        - name: Copy patch files into source tree
-          run: |
-            cp icon.jpg nagram/icon.jpg
-            cp patches/apply_patches.py nagram/apply_patches.py
-            cp patches/SessionImportHelper.java nagram/SessionImportHelper.java
-            cp patches/SessionFormatPickerBottomSheet.java nagram/SessionFormatPickerBottomSheet.java
+      - name: Copy patch files
+        run: |
+          cp icon.jpg nagram/icon.jpg
+          cp patches/apply_patches.py nagram/apply_patches.py
+          cp patches/SessionImportHelper.java nagram/SessionImportHelper.java
+          cp patches/SessionFormatPickerBottomSheet.java nagram/SessionFormatPickerBottomSheet.java
 
-        - name: Apply FavoriteGram patches
-          run: |
-            cd nagram
-            python3 apply_patches.py
+      - name: Apply patches
+        run: cd nagram && python3 apply_patches.py
 
-        - name: Install ImageMagick and replace icons
-          run: |
-            sudo apt-get install -y imagemagick
-            cd nagram
-            python3 - <<'PYEOF'
-  import subprocess, os, sys
+      - name: Install ImageMagick
+        run: sudo apt-get install -y imagemagick
 
-  sizes = {
-      'mipmap-mdpi':    48,
-      'mipmap-hdpi':    72,
-      'mipmap-xhdpi':   96,
-      'mipmap-xxhdpi':  144,
-      'mipmap-xxxhdpi': 192,
-  }
-  base = 'TMessagesProj/src/main/res'
-  icon = 'icon.jpg'
-  replaced = 0
-  for dirname, size in sizes.items():
-      dpath = os.path.join(base, dirname)
-      if not os.path.isdir(dpath):
-          continue
-      for fname in os.listdir(dpath):
-          if fname.endswith('.png') and 'ic_launcher' in fname and 'night' not in fname:
-              target = os.path.join(dpath, fname)
-              r = subprocess.run(
-                  ['convert', icon,
-                   '-resize', f'{size}x{size}^',
-                   '-gravity', 'center',
-                   '-extent', f'{size}x{size}',
-                   target],
-                  capture_output=True)
-              if r.returncode == 0:
-                  replaced += 1
-                  print(f'  OK: {target}')
-              else:
-                  print(f'  FAIL: {target}: {r.stderr.decode()}')
-  print(f'Total icons replaced: {replaced}')
-  PYEOF
+      - name: Replace icons
+        run: |
+          cd nagram
+          BASE=TMessagesProj/src/main/res
+          for D_SIZE in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
+            D=${D_SIZE%%:*}
+            S=${D_SIZE##*:}
+            for F in "$BASE/$D"/ic_launcher*.png; do
+              [ -f "$F" ] || continue
+              convert icon.jpg -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$F" && echo "OK: $F" || echo "FAIL: $F"
+            done
+          done
 
-        - name: Setup local.properties
-          run: |
-            cd nagram
-            echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-            echo "MAPS_API_KEY=AIzaFakeKeyForDebug000000000000000000000" >> local.properties
-            cat local.properties
+      - name: Setup local.properties
+        run: |
+          cd nagram
+          printf "sdk.dir=%s\n" "$ANDROID_SDK_ROOT" > local.properties
+          printf "MAPS_API_KEY=AIzaFakeKeyForDebug\n" >> local.properties
+          cat local.properties
 
-        - name: Show SDK info
-          run: |
-            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-            ls $ANDROID_SDK_ROOT/build-tools/ 2>/dev/null | tail -5 || echo "no build-tools"
-            ls $ANDROID_SDK_ROOT/platforms/ 2>/dev/null | tail -5 || echo "no platforms"
+      - name: Show Android SDK
+        run: |
+          echo "SDK: $ANDROID_SDK_ROOT"
+          ls "$ANDROID_SDK_ROOT/build-tools/" 2>/dev/null | tail -5
+          ls "$ANDROID_SDK_ROOT/platforms/" 2>/dev/null | tail -5
 
-        - name: Check build.gradle
-          run: |
-            cd nagram
-            cat TMessagesProj/build.gradle | head -60
+      - name: Show build.gradle head
+        run: head -80 nagram/TMessagesProj/build.gradle
 
-        - name: Make gradlew executable
-          run: chmod +x nagram/gradlew
+      - name: Make gradlew executable
+        run: chmod +x nagram/gradlew
 
-        - name: Build Debug APK
-          run: |
-            cd nagram
-            ./gradlew assembleDebug \
-              --no-daemon \
-              --stacktrace \
-              -x lint \
-              -x lintDebug \
-              -x test \
-              2>&1
+      - name: Build Debug APK
+        run: |
+          cd nagram
+          ./gradlew assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test
 
-        - name: Find APKs
-          run: |
-            echo "=== APKs found ==="
-            find nagram -name "*.apk" 2>/dev/null
-            find nagram -name "*.apk" 2>/dev/null | wc -l
+      - name: Find APKs
+        run: find nagram -name "*.apk" 2>/dev/null
 
-        - name: Upload APK
-          uses: actions/upload-artifact@v4
-          with:
-            name: FavoriteGram-debug
-            path: nagram/**/outputs/apk/**/*.apk
-            if-no-files-found: error
-            retention-days: 30
-  
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FavoriteGram-debug
+          path: nagram/**/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
