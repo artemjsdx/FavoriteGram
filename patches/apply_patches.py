@@ -136,8 +136,8 @@ def patch_intro_activity():
         "                new SessionFormatPickerBottomSheet(getParentActivity(), frameContainerView).show();\n"
         "            }\n"
         "        });\n"
-        "        frameContainerView.addView(sessionImportBtn, org.telegram.messenger.LayoutHelper.createFrame(\n"
-        "            org.telegram.messenger.LayoutHelper.MATCH_PARENT, 40,\n"
+        "        frameContainerView.addView(sessionImportBtn, org.telegram.ui.Components.LayoutHelper.createFrame(\n"
+        "            org.telegram.ui.Components.LayoutHelper.MATCH_PARENT, 40,\n"
         "            android.view.Gravity.CENTER_HORIZONTAL | android.view.Gravity.BOTTOM, 16, 0, 16, 32));\n"
     )
 
