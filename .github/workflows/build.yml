@@ -7,48 +7,46 @@ on:
 
 jobs:
 
-  # ── Stage 1: Build FFmpeg + libvpx native libs ──────────────────────────
   ffmpeg:
     name: Native Build (FFmpeg + libvpx)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Clone Nagram
         run: |
           git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-          cd nagram
-          sed -i "s/\/\///g" settings.gradle || true
+          cd nagram && sed -i "s/\/\///g" settings.gradle || true
 
       - name: Init ffmpeg + libvpx submodules
-        run: |
-          cd nagram
-          git submodule update --init --depth=1 TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx
+        run: cd nagram && git submodule update --init --depth=1 TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx
 
-      - name: Cache ffmpeg + libvpx build
+      - name: Cache native libs
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
           path: |
             nagram/TMessagesProj/jni/ffmpeg/build
             nagram/TMessagesProj/jni/libvpx/build
-          key: ffmpeg-libvpx-v1-${{ hashFiles('nagram/TMessagesProj/jni/build_ffmpeg_clang.sh', 'nagram/TMessagesProj/jni/build_libvpx_clang.sh') }}
+          key: ffmpeg-v2-${{ hashFiles('nagram/TMessagesProj/jni/build_ffmpeg_clang.sh', 'nagram/TMessagesProj/jni/build_libvpx_clang.sh') }}
 
-      - name: Setup Java
+      - uses: actions/setup-java@v4
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: temurin
 
-      - name: Install NDK
+      - name: Setup Android SDK + NDK
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          echo "y" | sdkmanager --install "ndk;21.4.7075529" --sdk_root=${ANDROID_SDK_ROOT} > /dev/null
-          echo "sdk.dir=${ANDROID_HOME}" > nagram/local.properties
-          echo "ndk.dir=${ANDROID_HOME}/ndk/21.4.7075529" >> nagram/local.properties
+          SDKROOT=/usr/local/lib/android/sdk
+          SDKMGR="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          echo "y" | "$SDKMGR" --install "ndk;21.4.7075529" > /dev/null
+          echo "sdk.dir=$SDKROOT" > nagram/local.properties
+          echo "ndk.dir=$SDKROOT/ndk/21.4.7075529" >> nagram/local.properties
+          echo "ANDROID_HOME=$SDKROOT" >> $GITHUB_ENV
+          echo "NDK_HOME=$SDKROOT/ndk/21.4.7075529" >> $GITHUB_ENV
 
       - name: Build FFmpeg + libvpx
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -59,73 +57,65 @@ jobs:
           ./run init libs libvpx
           ./run init libs ffmpeg
 
-  # ── Stage 2: Build BoringSSL ────────────────────────────────────────────
   boringssl:
     name: Native Build (BoringSSL)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Clone Nagram
         run: |
           git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
 
       - name: Init boringssl submodule
-        run: |
-          cd nagram
-          git submodule update --init --depth=1 TMessagesProj/jni/boringssl
+        run: cd nagram && git submodule update --init --depth=1 TMessagesProj/jni/boringssl
 
-      - name: Cache BoringSSL build
+      - name: Cache BoringSSL
         id: cache-boringssl
         uses: actions/cache@v4
         with:
           path: nagram/TMessagesProj/jni/boringssl/build
-          key: boringssl-v1-${{ hashFiles('nagram/TMessagesProj/jni/build_boringssl.sh') }}
+          key: boringssl-v2-${{ hashFiles('nagram/TMessagesProj/jni/build_boringssl.sh') }}
 
-      - name: Setup Java
+      - uses: actions/setup-java@v4
         if: steps.cache-boringssl.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: temurin
 
-      - name: Install NDK
+      - name: Setup Android SDK + NDK
         if: steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
-          echo "y" | sdkmanager --install "ndk;21.4.7075529" --sdk_root=${ANDROID_SDK_ROOT} > /dev/null
-          echo "sdk.dir=${ANDROID_HOME}" > nagram/local.properties
-          echo "ndk.dir=${ANDROID_HOME}/ndk/21.4.7075529" >> nagram/local.properties
+          SDKROOT=/usr/local/lib/android/sdk
+          SDKMGR="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          echo "y" | "$SDKMGR" --install "ndk;21.4.7075529" > /dev/null
+          echo "sdk.dir=$SDKROOT" > nagram/local.properties
+          echo "ndk.dir=$SDKROOT/ndk/21.4.7075529" >> nagram/local.properties
+          sudo apt-get install -y cmake ninja-build
 
       - name: Build BoringSSL
         if: steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y cmake ninja-build
           cd nagram
           chmod +x ./run
           ./run init action boringssl
 
-  # ── Stage 3: Apply patches + Build APK ──────────────────────────────────
   build:
     name: Build APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs: [ffmpeg, boringssl]
     steps:
-      - name: Checkout FavoriteGram
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Clone Nagram
         run: |
           git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-          cd nagram
-          sed -i "s/\/\///g" settings.gradle || true
+          cd nagram && sed -i "s/\/\///g" settings.gradle || true
 
       - name: Init all submodules
-        run: |
-          cd nagram
-          git submodule update --init --recursive --depth=1
+        run: cd nagram && git submodule update --init --recursive --depth=1
 
       - name: Restore FFmpeg cache
         uses: actions/cache@v4
@@ -133,35 +123,30 @@ jobs:
           path: |
             nagram/TMessagesProj/jni/ffmpeg/build
             nagram/TMessagesProj/jni/libvpx/build
-          key: ffmpeg-libvpx-v1-${{ hashFiles('nagram/TMessagesProj/jni/build_ffmpeg_clang.sh', 'nagram/TMessagesProj/jni/build_libvpx_clang.sh') }}
+          key: ffmpeg-v2-${{ hashFiles('nagram/TMessagesProj/jni/build_ffmpeg_clang.sh', 'nagram/TMessagesProj/jni/build_libvpx_clang.sh') }}
 
       - name: Restore BoringSSL cache
         uses: actions/cache@v4
         with:
           path: nagram/TMessagesProj/jni/boringssl/build
-          key: boringssl-v1-${{ hashFiles('nagram/TMessagesProj/jni/build_boringssl.sh') }}
+          key: boringssl-v2-${{ hashFiles('nagram/TMessagesProj/jni/build_boringssl.sh') }}
 
-      - name: Check native libs exist
-        run: |
-          ls nagram/TMessagesProj/jni/ffmpeg/build/arm64-v8a/lib/ 2>/dev/null || echo "WARNING: ffmpeg arm64 libs missing"
-          ls nagram/TMessagesProj/jni/boringssl/build/ 2>/dev/null || echo "WARNING: boringssl build missing"
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: temurin
 
-      - name: Install NDK
+      - name: Setup Android SDK + NDK
         run: |
-          echo "y" | sdkmanager --install "ndk;21.4.7075529" --sdk_root=${ANDROID_SDK_ROOT} > /dev/null
-          echo "sdk.dir=${ANDROID_HOME}" > nagram/local.properties
-          echo "ndk.dir=${ANDROID_HOME}/ndk/21.4.7075529" >> nagram/local.properties
+          SDKROOT=/usr/local/lib/android/sdk
+          SDKMGR="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+          echo "y" | "$SDKMGR" --install "ndk;21.4.7075529" > /dev/null
+          echo "sdk.dir=$SDKROOT" > nagram/local.properties
+          echo "ndk.dir=$SDKROOT/ndk/21.4.7075529" >> nagram/local.properties
           echo "MAPS_API_KEY=AIzaFakeKeyForDebug" >> nagram/local.properties
           cat nagram/local.properties
 
-      - name: Install ImageMagick
-        run: sudo apt-get install -y imagemagick
+      - run: sudo apt-get install -y imagemagick
 
       - name: Copy patch files
         run: |
@@ -178,16 +163,13 @@ jobs:
           cd nagram
           BASE=TMessagesProj/src/main/res
           for D_SIZE in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
-            D=${D_SIZE%%:*}
-            S=${D_SIZE##*:}
+            D=${D_SIZE%%:*} ; S=${D_SIZE##*:}
             for F in "$BASE/$D"/ic_launcher*.png; do
-              [ -f "$F" ] || continue
-              convert icon.jpg -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$F" && echo "OK: $F" || true
+              [ -f "$F" ] && convert icon.jpg -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$F" && echo "OK: $F" || true
             done
           done
 
-      - name: Make gradlew executable
-        run: chmod +x nagram/gradlew
+      - run: chmod +x nagram/gradlew
 
       - name: Build Debug APK
         run: |
@@ -195,10 +177,9 @@ jobs:
           ./gradlew :TMessagesProj_App:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test
 
       - name: Find APKs
-        run: find nagram -name "*.apk" 2>/dev/null
+        run: find nagram -name "*.apk"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: FavoriteGram-debug
           path: nagram/**/outputs/apk/**/*.apk
