@@ -1,0 +1,108 @@
+name: Build FavoriteGram APK
+
+  on:
+    push:
+      branches: [main]
+    workflow_dispatch:
+
+  jobs:
+    build:
+      runs-on: ubuntu-latest
+      timeout-minutes: 90
+
+      steps:
+        - name: Checkout FavoriteGram repo
+          uses: actions/checkout@v4
+
+        - name: Set up JDK 17
+          uses: actions/setup-java@v4
+          with:
+            java-version: '17'
+            distribution: 'temurin'
+
+        - name: Clone Nagram source (shallow)
+          run: |
+            git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
+            echo "=== Nagram root ===" && ls nagram/
+            echo "=== Nagram submodules ===" && cat nagram/.gitmodules 2>/dev/null || echo "no submodules"
+
+        - name: Init submodules (if any)
+          run: |
+            cd nagram
+            git submodule update --init --recursive --depth=1 2>/dev/null || echo "no submodules needed"
+
+        - name: Apply FavoriteGram patches
+          run: |
+            cp icon.jpg nagram/icon.jpg
+            cp patches/apply_patches.py nagram/apply_patches.py
+            cd nagram
+            python3 apply_patches.py
+
+        - name: Install ImageMagick and resize icons
+          run: |
+            sudo apt-get install -y imagemagick
+            cd nagram
+            python3 - <<'EOF'
+  import subprocess, os
+
+  sizes = {
+      'mipmap-mdpi':    48,
+      'mipmap-hdpi':    72,
+      'mipmap-xhdpi':   96,
+      'mipmap-xxhdpi':  144,
+      'mipmap-xxxhdpi': 192,
+  }
+  base = 'TMessagesProj/src/main/res'
+  for dirname, size in sizes.items():
+      for suffix in ['ic_launcher.png', 'ic_launcher_round.png',
+                     'ic_launcher_foreground.png', 'ic_launcher_foreground_2.png',
+                     'ic_fg_nagram.png', 'ic_nagram_fg.png']:
+          target = os.path.join(base, dirname, suffix)
+          if os.path.exists(target):
+              subprocess.run(['convert', 'icon.jpg',
+                              '-resize', f'{size}x{size}^',
+                              '-gravity', 'center',
+                              '-extent', f'{size}x{size}',
+                              target], check=False)
+              print(f'Replaced {target}')
+  EOF
+
+        - name: Setup local.properties
+          run: |
+            cd nagram
+            echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+            echo "MAPS_API_KEY=AIzaFakeKeyForDebugBuild" >> local.properties
+            cat local.properties
+
+        - name: Check SDK
+          run: |
+            echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            ls $ANDROID_SDK_ROOT/build-tools/ | tail -3 || true
+
+        - name: Make gradlew executable
+          run: chmod +x nagram/gradlew
+
+        - name: Build Debug APK
+          run: |
+            cd nagram
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              -x lint \
+              -x test \
+              -x lintDebug \
+              2>&1
+
+        - name: Find built APKs
+          run: |
+            find nagram -name "*.apk" 2>/dev/null | tee /tmp/apk_list.txt
+            cat /tmp/apk_list.txt
+
+        - name: Upload APK as artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: FavoriteGram-debug
+            path: nagram/**/outputs/apk/**/*.apk
+            if-no-files-found: error
+            retention-days: 30
+  
