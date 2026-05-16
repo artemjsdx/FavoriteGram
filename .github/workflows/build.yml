@@ -63,24 +63,19 @@ jobs:
 
       - name: Patch debug signingConfig
         run: |
-          # Remove signingConfig from debug buildType so Android uses its default debug keystore
-          # The debug block spans lines: debug { ... signingConfig signingConfigs.release ... }
-          # We use Python for reliable multiline replacement
-          python3 - <<'EOF'
-import re, pathlib
-p = pathlib.Path("nagram/TMessagesProj/build.gradle")
-text = p.read_text()
-# Remove signingConfig line only within the debug { } block
-# Strategy: remove the line inside debug block, leave release block untouched
-fixed = re.sub(
-    r'(debug\s*\{[^}]*?)(\s*signingConfig signingConfigs\.release)',
-    r'\1',
-    text,
-    count=1
-)
-p.write_text(fixed)
-print("Patched debug signingConfig OK")
-EOF
+          python3 << 'PYEOF'
+          import re, pathlib
+          p = pathlib.Path('nagram/TMessagesProj/build.gradle')
+          text = p.read_text()
+          fixed = re.sub(
+              r'(debug\s*\{[^}]*?)(\s*signingConfig signingConfigs\.release)',
+              r'\1',
+              text,
+              count=1
+          )
+          p.write_text(fixed)
+          print('Patched debug signingConfig OK')
+          PYEOF
 
       - name: Init native submodules (if needed)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
