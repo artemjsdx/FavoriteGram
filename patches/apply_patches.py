@@ -281,45 +281,43 @@ def bypass_integrity_check():
     log("  replaced integrity.cpp with JNI_OK stub")
 
 
-  # --- 7b. PATCH LAUNCH ACTIVITY (onActivityResult для file picker) ---
-  def patch_launch_activity():
-      log("=== Patching LaunchActivity.java (onActivityResult) ===")
-      launch_path = None
-      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-          if "LaunchActivity.java" in files:
-              launch_path = os.path.join(dirpath, "LaunchActivity.java")
-              break
-      if not launch_path:
-          log("  ERROR: LaunchActivity.java not found!")
-          return
-      txt = open(launch_path, encoding="utf-8", errors="ignore").read()
-      if "SessionFormatPickerBottomSheet.handleResult" in txt:
-          log("  already patched")
-          return
-      # Inject into existing onActivityResult if present
-      if "public void onActivityResult" in txt:
-          txt = re.sub(
-              r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
-              lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
-              txt, count=1)
-          log("  injected handleResult into existing LaunchActivity.onActivityResult")
-      else:
-          # Add new method before last closing brace
-          override = (
-              "\n"
-              "    @Override\n"
-              "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
-              "        super.onActivityResult(requestCode, resultCode, data);\n"
-              "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
-              "    }\n"
-          )
-          last = txt.rfind("}")
-          txt = txt[:last] + override + txt[last:]
-          log("  added onActivityResult to LaunchActivity")
-      open(launch_path, "w", encoding="utf-8").write(txt)
-      log("  LaunchActivity done")
+# --- 7b. PATCH LAUNCH ACTIVITY (onActivityResult для file picker) ---
+def patch_launch_activity():
+    log("=== Patching LaunchActivity.java (onActivityResult) ===")
+    launch_path = None
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "LaunchActivity.java" in files:
+            launch_path = os.path.join(dirpath, "LaunchActivity.java")
+            break
+    if not launch_path:
+        log("  ERROR: LaunchActivity.java not found!")
+        return
+    txt = open(launch_path, encoding="utf-8", errors="ignore").read()
+    if "SessionFormatPickerBottomSheet.handleResult" in txt:
+        log("  already patched")
+        return
+    if "public void onActivityResult" in txt:
+        txt = re.sub(
+            r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
+            lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
+            txt, count=1)
+        log("  injected handleResult into existing LaunchActivity.onActivityResult")
+    else:
+        override = (
+            "\n"
+            "    @Override\n"
+            "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
+            "        super.onActivityResult(requestCode, resultCode, data);\n"
+            "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
+            "    }\n"
+        )
+        last = txt.rfind("}")
+        txt = txt[:last] + override + txt[last:]
+        log("  added onActivityResult to LaunchActivity")
+    open(launch_path, "w", encoding="utf-8").write(txt)
+    log("  LaunchActivity done")
 
-  # --- MAIN ---
+# --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     bypass_integrity_check()
