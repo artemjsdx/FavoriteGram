@@ -17,7 +17,7 @@ jobs:
       - name: Clone Nagram
         run: |
           git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-          cd nagram && sed -i 's/\/\///g' settings.gradle
+          cd nagram && sed -i 's/////g' settings.gradle
 
       - name: Compute cache keys
         id: keys
@@ -134,7 +134,22 @@ jobs:
       - name: Build Debug APK
         run: |
           cd nagram
-          ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test
+          set -o pipefail
+          ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test 2>&1 | tee /tmp/gradle.log
+
+      - name: Show Gradle errors (always)
+        if: always()
+        run: |
+          echo "=== ERRORS/FAILURES ==="
+          grep -E "error:|FAILED|Exception|error:" /tmp/gradle.log 2>/dev/null | tail -100 || echo "(no log file)"
+
+      - name: Upload Gradle log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-log
+          path: /tmp/gradle.log
+          retention-days: 3
 
       - name: Find APKs
         run: find nagram -name "*.apk"
