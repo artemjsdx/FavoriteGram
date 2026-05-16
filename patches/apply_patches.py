@@ -155,28 +155,6 @@ def patch_intro_activity():
         log("  WARNING: 'destroyed = true' marker not found -- skipping button injection")
 
 
-    # FavoriteGram: inject onActivityResult so file picker result reaches handleResult
-    if "SessionFormatPickerBottomSheet.handleResult" not in txt:
-        if "public void onActivityResult" in txt:
-            txt = re.sub(
-                r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
-                lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
-                txt, count=1)
-            log("  injected handleResult into existing onActivityResult")
-        else:
-            override = (
-                "\n"
-                "    @Override\n"
-                "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
-                "        super.onActivityResult(requestCode, resultCode, data);\n"
-                "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
-                "    }\n"
-            )
-            last = txt.rfind("}")
-            txt = txt[:last] + override + txt[last:]
-            log("  added new onActivityResult override")
-
-    open(intro_path, "w", encoding="utf-8").write(txt)
     log("  IntroActivity done")
 
 # --- 6. GOOGLE SERVICES FIX ---
@@ -302,7 +280,46 @@ def bypass_integrity_check():
     open(path, "w", encoding="utf-8").write(stub)
     log("  replaced integrity.cpp with JNI_OK stub")
 
-# --- MAIN ---
+
+  # --- 7b. PATCH LAUNCH ACTIVITY (onActivityResult для file picker) ---
+  def patch_launch_activity():
+      log("=== Patching LaunchActivity.java (onActivityResult) ===")
+      launch_path = None
+      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+          if "LaunchActivity.java" in files:
+              launch_path = os.path.join(dirpath, "LaunchActivity.java")
+              break
+      if not launch_path:
+          log("  ERROR: LaunchActivity.java not found!")
+          return
+      txt = open(launch_path, encoding="utf-8", errors="ignore").read()
+      if "SessionFormatPickerBottomSheet.handleResult" in txt:
+          log("  already patched")
+          return
+      # Inject into existing onActivityResult if present
+      if "public void onActivityResult" in txt:
+          txt = re.sub(
+              r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
+              lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
+              txt, count=1)
+          log("  injected handleResult into existing LaunchActivity.onActivityResult")
+      else:
+          # Add new method before last closing brace
+          override = (
+              "\n"
+              "    @Override\n"
+              "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
+              "        super.onActivityResult(requestCode, resultCode, data);\n"
+              "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
+              "    }\n"
+          )
+          last = txt.rfind("}")
+          txt = txt[:last] + override + txt[last:]
+          log("  added onActivityResult to LaunchActivity")
+      open(launch_path, "w", encoding="utf-8").write(txt)
+      log("  LaunchActivity done")
+
+  # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     bypass_integrity_check()
@@ -312,6 +329,7 @@ if __name__ == "__main__":
     add_session_strings()
     copy_session_import_files()
     patch_intro_activity()
+    patch_launch_activity()
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
