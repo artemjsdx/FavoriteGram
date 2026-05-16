@@ -296,9 +296,9 @@ def patch_launch_activity():
     if "SessionFormatPickerBottomSheet.handleResult" in txt:
         log("  already patched")
         return
-    if "public void onActivityResult" in txt:
+    if "void onActivityResult" in txt:
         txt = re.sub(
-            r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
+            r"((?:public|protected)\s+void\s+onActivityResult\s*\(int\s+requestCode,\s*int\s+resultCode,\s*[\w.@\s]+\s+data\)\s*\{)",
             lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
             txt, count=1)
         log("  injected handleResult into existing LaunchActivity.onActivityResult")
