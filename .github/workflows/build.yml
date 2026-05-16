@@ -61,6 +61,21 @@ jobs:
           echo "ANDROID_HOME=$SDKROOT" >> $GITHUB_ENV
           cat nagram/local.properties
 
+      - name: Generate debug keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore nagram/TMessagesProj/release.keystore \
+            -alias favoritegram \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass favoritegram123 \
+            -keypass favoritegram123 \
+            -dname "CN=FavoriteGram, O=FavoriteGram, C=US" \
+            -noprompt
+          echo "KEYSTORE_PASS=favoritegram123" >> nagram/local.properties
+          echo "ALIAS_NAME=favoritegram" >> nagram/local.properties
+          echo "ALIAS_PASS=favoritegram123" >> nagram/local.properties
+          echo "Keystore generated OK"
+
       - name: Init native submodules (if needed)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
