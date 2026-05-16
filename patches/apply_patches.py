@@ -220,8 +220,53 @@ def remove_v7a():
         log("  WARNING: armeabi-v7a pattern not found in splits")
 
 # --- MAIN ---
+
+  # --- INTEGRITY CHECK BYPASS ---
+  def bypass_integrity_check():
+      log("=== Bypassing native integrity check ===")
+      path = "TMessagesProj/jni/integrity/integrity.cpp"
+      if not os.path.exists(path):
+          log("  integrity.cpp not found, skipping")
+          return
+      txt = open(path, encoding="utf-8", errors="ignore").read()
+      orig = txt
+      # Replace verifySign body to always return JNI_OK (debug build)
+      txt = re.sub(
+          r'int verifySign\(JNIEnv \*env\)\s*\{[^}]*\}',
+          'int verifySign(JNIEnv *env) {\n    return JNI_OK;\n}',
+          txt,
+          flags=re.DOTALL
+      )
+      if txt != orig:
+          open(path, "w", encoding="utf-8").write(txt)
+          log("  patched: verifySign now returns JNI_OK")
+      else:
+          log("  WARNING: regex did not match, trying line-by-line replace")
+          lines = txt.split("\n")
+          out = []
+          skip = False
+          depth = 0
+          for line in lines:
+              if "int verifySign(JNIEnv *env)" in line:
+                  out.append("int verifySign(JNIEnv *env) {")
+                  out.append("    return JNI_OK;")
+                  skip = True
+                  depth = 0
+              if skip:
+                  depth += line.count("{") - line.count("}")
+                  if depth <= 0 and "{" in line:
+                      out.append("}")
+                      skip = False
+              else:
+                  out.append(line)
+          fixed = "\n".join(out)
+          open(path, "w", encoding="utf-8").write(fixed)
+          log("  patched via line-by-line")
+
+  
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    bypass_integrity_check()
     rename_branding()
     remove_account_limit()
     add_session_strings()
