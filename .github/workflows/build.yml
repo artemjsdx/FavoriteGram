@@ -17,7 +17,7 @@ jobs:
       - name: Clone Nagram
         run: |
           git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-          cd nagram && sed -i 's/////g' settings.gradle
+          cd nagram && sed -i 's/\/\///g' settings.gradle
 
       - name: Compute cache keys
         id: keys
