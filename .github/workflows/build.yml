@@ -35,14 +35,14 @@ jobs:
           path: |
             nagram/TMessagesProj/jni/ffmpeg/build
             nagram/TMessagesProj/jni/libvpx/build
-          key: v3-ffmpeg-ndk21-${{ steps.keys.outputs.ffmpeg }}
+          key: v4-ffmpeg-ndk21-${{ steps.keys.outputs.ffmpeg }}
 
       - name: Cache BoringSSL
         id: cache-boringssl
         uses: actions/cache@v4
         with:
           path: nagram/TMessagesProj/jni/boringssl/build
-          key: v3-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
+          key: v4-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
