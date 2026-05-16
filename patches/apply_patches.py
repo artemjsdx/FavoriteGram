@@ -261,38 +261,24 @@ def bypass_integrity_check():
         log("  integrity.cpp not found, skipping")
         return
     txt = open(path, encoding="utf-8", errors="ignore").read()
-    orig = txt
-    txt = re.sub(
-        r'int verifySign\(JNIEnv \*env\)\s*\{[^}]*\}',
-        'int verifySign(JNIEnv *env) {\n    return JNI_OK;\n}',
-        txt,
-        flags=re.DOTALL
+    if "return JNI_OK;" in txt and "getApplication" not in txt:
+        log("  already bypassed")
+        return
+    # Write a clean stub that always returns JNI_OK — avoids any regex/brace-counting bugs
+    stub = (
+        '#include "meth.h"\n'
+        '#include "openat.h"\n'
+        '#include "read_cert.h"\n'
+        '#include "SHA1.h"\n'
+        "\n"
+        'extern "C" {\n'
+        "int verifySign(JNIEnv *env) {\n"
+        "    return JNI_OK;\n"
+        "}\n"
+        "}\n"
     )
-    if txt != orig:
-        open(path, "w", encoding="utf-8").write(txt)
-        log("  patched: verifySign now returns JNI_OK")
-    else:
-        log("  WARNING: regex did not match, trying line-by-line replace")
-        lines = txt.split("\n")
-        out = []
-        skip = False
-        depth = 0
-        for line in lines:
-            if "int verifySign(JNIEnv *env)" in line:
-                out.append("int verifySign(JNIEnv *env) {")
-                out.append("    return JNI_OK;")
-                skip = True
-                depth = 0
-            if skip:
-                depth += line.count("{") - line.count("}")
-                if depth <= 0 and "{" in line:
-                    out.append("}")
-                    skip = False
-            else:
-                out.append(line)
-        fixed = "\n".join(out)
-        open(path, "w", encoding="utf-8").write(fixed)
-        log("  patched via line-by-line")
+    open(path, "w", encoding="utf-8").write(stub)
+    log("  replaced integrity.cpp with JNI_OK stub")
 
 # --- MAIN ---
 if __name__ == "__main__":
