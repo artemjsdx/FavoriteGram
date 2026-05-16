@@ -118,7 +118,17 @@ jobs:
           echo "=== BoringSSL ===" && find nagram/TMessagesProj/jni/boringssl/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
 
       - name: Init remaining submodules
-        run: cd nagram && git submodule update --init --recursive --depth=1
+        run: |
+          cd nagram
+          # Cache restores only the build/ subdir, creating stub parent dirs without .git
+          # Remove those stubs so git submodule update can clone properly
+          for d in TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx; do
+            if [ -d "$d" ] && [ ! -d "$d/.git" ] && [ ! -f "$d/.git" ]; then
+              echo "Removing cache stub: $d"
+              rm -rf "$d"
+            fi
+          done
+          git submodule update --init --recursive --depth=1
 
       - name: Install ImageMagick
         run: sudo apt-get install -y imagemagick
