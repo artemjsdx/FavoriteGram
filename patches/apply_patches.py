@@ -155,28 +155,28 @@ def patch_intro_activity():
         log("  WARNING: 'destroyed = true' marker not found -- skipping button injection")
 
 
-      # FavoriteGram: inject onActivityResult so file picker result reaches handleResult
-      if "SessionFormatPickerBottomSheet.handleResult" not in txt:
-          if "public void onActivityResult" in txt:
-              txt = re.sub(
-                  r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
-                  lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
-                  txt, count=1)
-              log("  injected handleResult into existing onActivityResult")
-          else:
-              override = (
-                  "\n"
-                  "    @Override\n"
-                  "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
-                  "        super.onActivityResult(requestCode, resultCode, data);\n"
-                  "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
-                  "    }\n"
-              )
-              last = txt.rfind("}")
-              txt = txt[:last] + override + txt[last:]
-              log("  added new onActivityResult override")
+    # FavoriteGram: inject onActivityResult so file picker result reaches handleResult
+    if "SessionFormatPickerBottomSheet.handleResult" not in txt:
+        if "public void onActivityResult" in txt:
+            txt = re.sub(
+                r"(public void onActivityResult\(int requestCode, int resultCode, [\w. ]+data\)\s*\{)",
+                lambda m: m.group(0) + "\n        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);",
+                txt, count=1)
+            log("  injected handleResult into existing onActivityResult")
+        else:
+            override = (
+                "\n"
+                "    @Override\n"
+                "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
+                "        super.onActivityResult(requestCode, resultCode, data);\n"
+                "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
+                "    }\n"
+            )
+            last = txt.rfind("}")
+            txt = txt[:last] + override + txt[last:]
+            log("  added new onActivityResult override")
 
-      open(intro_path, "w", encoding="utf-8").write(txt)
+    open(intro_path, "w", encoding="utf-8").write(txt)
     log("  IntroActivity done")
 
 # --- 6. GOOGLE SERVICES FIX ---
