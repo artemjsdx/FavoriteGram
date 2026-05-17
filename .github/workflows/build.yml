@@ -111,7 +111,7 @@ jobs:
           ./run init action boringssl
           ./run init libs boringssl
 
-      - name: Verify native libs
+      - name: Verify native libs (pre-submodule-init)
         run: |
           echo "=== FFmpeg ===" && find nagram/TMessagesProj/jni/ffmpeg/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
           echo "=== libvpx ===" && find nagram/TMessagesProj/jni/libvpx/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
@@ -136,14 +136,26 @@ jobs:
             fi
           done
           git submodule update --init --recursive --depth=1
-          # Restore saved .a files
+          # Restore saved .a files — rm -rf build first so cp creates it fresh
+          # (avoids wrong nested copy if the cloned repo already has a build/ dir)
           for lib in ffmpeg libvpx boringssl; do
             if [ -d /tmp/saved-libs/$lib-build ]; then
-              mkdir -p "TMessagesProj/jni/$lib"
+              rm -rf "TMessagesProj/jni/$lib/build"
               cp -r "/tmp/saved-libs/$lib-build" "TMessagesProj/jni/$lib/build"
               echo "Restored $lib/build ($(find TMessagesProj/jni/$lib/build -name '*.a' 2>/dev/null | wc -l) .a files)"
+              echo "  arm64-v8a check: $(ls TMessagesProj/jni/$lib/build/arm64-v8a/lib/*.a 2>/dev/null || echo MISSING)"
             fi
           done
+
+      - name: Verify native libs (post-submodule-init)
+        run: |
+          echo "=== FFmpeg ===" && find nagram/TMessagesProj/jni/ffmpeg/build -name "*.a" 2>/dev/null | head -10 || echo MISSING
+          echo "=== libvpx ===" && find nagram/TMessagesProj/jni/libvpx/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
+          echo "=== BoringSSL ===" && find nagram/TMessagesProj/jni/boringssl/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
+          # Fail fast if critical .a is missing
+          test -f nagram/TMessagesProj/jni/libvpx/build/arm64-v8a/lib/libvpx.a || { echo "ERROR: libvpx arm64-v8a MISSING"; exit 1; }
+          test -f nagram/TMessagesProj/jni/libvpx/build/armeabi-v7a/lib/libvpx.a || { echo "ERROR: libvpx armeabi-v7a MISSING"; exit 1; }
+          echo "All critical .a files present OK"
 
       - name: Install ImageMagick
         run: sudo apt-get install -y imagemagick
