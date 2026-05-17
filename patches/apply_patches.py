@@ -633,16 +633,20 @@ def patch_profile_activity_current_chat_null_check():
             continue
         path = os.path.join(dirpath, "ProfileActivity.java")
         txt = open(path, encoding="utf-8", errors="ignore").read()
-        if "FG_FIX9" in txt:
-            log("  already patched")
-            return
+        # FIX9: replace ALL bare `if (currentChat.megagroup) {` with null-guarded version.
+        # The original patch only replaced the first occurrence (line 2245), but the
+        # crash actually fires from line 5986 which has the same pattern. The null-guarded
+        # form is safe even when currentChat is already known to be non-null.
         old = "            if (currentChat.megagroup) {"
         new = "            if (currentChat != null && currentChat.megagroup) { // FG_FIX9"
-        if old in txt:
-            open(path, "w", encoding="utf-8").write(txt.replace(old, new, 1))
-            log("  patched ProfileActivity.java: currentChat null-check before .megagroup")
-        else:
-            log("  WARNING: FIX9 pattern not found!")
+        # Idempotency: only replace lines that still match the bare form (so re-running won't double-patch).
+        bare_count = txt.count(old)
+        if bare_count == 0:
+            log("  no bare matches left (already patched)")
+            return
+        new_txt = txt.replace(old, new)
+        open(path, "w", encoding="utf-8").write(new_txt)
+        log(f"  patched ProfileActivity.java: currentChat null-check before .megagroup ({bare_count} occurrence(s))")
         return
 
   # --- MAIN ---

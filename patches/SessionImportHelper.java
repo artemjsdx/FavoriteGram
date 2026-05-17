@@ -18,6 +18,7 @@ package org.telegram.ui;
     import java.io.FileInputStream;
     import java.io.FileOutputStream;
     import java.io.InputStream;
+    import java.security.MessageDigest;
 
     public class SessionImportHelper {
 
@@ -225,6 +226,14 @@ package org.telegram.ui;
                     uc.saveConfig(false);
                 }
 
+                // FG_FIX10: write tgnet.dat binary so native ConnectionsManager loads
+                // datacenter with hasAuthKey=1. Without this the account stays "Deleted Account".
+                try {
+                    writeTgnetDat(ctx, slot, dcId, authKey);
+                } catch (Exception e) {
+                    try { org.telegram.messenger.FileLog.e(e); } catch (Throwable ignored) {}
+                }
+
                 final int finalSlot = slot;
                 AndroidUtilities.runOnUIThread(() -> cb.onSuccess(finalSlot));
             } catch (Exception e) {
@@ -262,5 +271,185 @@ package org.telegram.ui;
             fos.close();
             is.close();
             return tmp;
+        }
+
+        // ===== FG_FIX10: tgnet.dat binary writer =====
+        // Native tgnet (Datacenter.cpp / ConnectionsManager.cpp) serializes config to a binary
+        // file at files/tgnet.dat (slot 0) or files/account{slot}/tgnet.dat (slot>0).
+        // We re-create that exact format so the native layer sees hasAuthKey=1 for our DC and can
+        // authorize the user. Without this, requests fail with "can't do request without login".
+
+        private static final int CONFIG_VERSION_OUTER = 5;
+        private static final int CONFIG_VERSION_DC = 13;
+        private static final int BOOL_TRUE  = 0xbc799737;
+        private static final int BOOL_FALSE = 0x997275b5;
+
+        /** Telegram production DC addresses (from ConnectionsManager::initDatacenters). */
+        private static final String[][] DC_IPV4 = new String[][] {
+            null,
+            new String[] {"149.154.175.50"},
+            new String[] {"149.154.167.51", "95.161.76.100"},
+            new String[] {"149.154.175.100"},
+            new String[] {"149.154.167.91"},
+            new String[] {"149.154.171.5"},
+        };
+        private static final String[][] DC_IPV6 = new String[][] {
+            null,
+            new String[] {"2001:b28:f23d:f001:0000:0000:0000:000a"},
+            new String[] {"2001:67c:4e8:f002:0000:0000:0000:000a"},
+            new String[] {"2001:b28:f23d:f003:0000:0000:0000:000a"},
+            new String[] {"2001:67c:4e8:f004:0000:0000:0000:000a"},
+            new String[] {"2001:b28:f23f:f005:0000:0000:0000:000a"},
+        };
+
+        private static void writeTgnetDat(Context ctx, int slot, int dcId, byte[] authKey) throws Exception {
+            File baseDir;
+            if (slot == 0) {
+                baseDir = ctx.getFilesDir();
+            } else {
+                baseDir = new File(ctx.getFilesDir(), "account" + slot);
+                if (!baseDir.exists()) baseDir.mkdirs();
+            }
+            File target = new File(baseDir, "tgnet.dat");
+
+            ByteArrayOutputStream inner = new ByteArrayOutputStream();
+            writeInt32(inner, CONFIG_VERSION_OUTER);
+            writeBool(inner, false);                // testBackend
+            writeBool(inner, false);                // clientBlocked
+            writeTLString(inner, "");               // lastInitSystemLangcode
+            writeBool(inner, true);                 // has current dc
+            writeInt32(inner, dcId);                // currentDatacenterId
+            writeInt32(inner, 0);                   // timeDifference
+            writeInt32(inner, 0);                   // lastDcUpdateTime
+            writeInt64(inner, 0L);                  // pushSessionId
+            writeBool(inner, false);                // registeredForInternalPush
+            writeInt32(inner, (int)(System.currentTimeMillis() / 1000L));  // lastServerTime
+            writeInt32(inner, 0);                   // sessionsToDestroy count
+
+            // datacenters: write all 5 production DCs, with authKey only on ours
+            writeInt32(inner, 5);
+            for (int dc = 1; dc <= 5; dc++) {
+                boolean ours = (dc == dcId);
+                writeDatacenter(inner, dc, ours ? authKey : null);
+            }
+
+            byte[] innerBytes = inner.toByteArray();
+            // Outer wrapper: 4-byte size + inner buffer (matches Config::writeConfig in native)
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            writeInt32(out, innerBytes.length);
+            out.write(innerBytes);
+
+            // Atomic write
+            File tmp = new File(target.getParentFile(), "tgnet.dat.tmp");
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                fos.write(out.toByteArray());
+                fos.getFD().sync();
+            }
+            if (target.exists()) target.delete();
+            if (!tmp.renameTo(target)) {
+                try (FileInputStream fis = new FileInputStream(tmp);
+                     FileOutputStream fos = new FileOutputStream(target)) {
+                    byte[] b = new byte[4096]; int n;
+                    while ((n = fis.read(b)) != -1) fos.write(b, 0, n);
+                }
+                tmp.delete();
+            }
+        }
+
+        private static void writeDatacenter(ByteArrayOutputStream s, int dcNum, byte[] authKey) throws Exception {
+            writeInt32(s, CONFIG_VERSION_DC);       // configVersion (datacenter)
+            writeInt32(s, dcNum);                   // datacenterId
+            writeInt32(s, 0);                       // lastInitVersion
+            writeInt32(s, 0);                       // lastInitMediaVersion
+
+            String[] ipv4 = DC_IPV4[dcNum];
+            String[] ipv6 = DC_IPV6[dcNum];
+            writeInt32(s, ipv4.length);
+            for (String addr : ipv4) {
+                writeTLString(s, addr);
+                writeInt32(s, 443);
+                writeInt32(s, 0);
+                writeTLString(s, "");
+            }
+            writeInt32(s, ipv6.length);
+            for (String addr : ipv6) {
+                writeTLString(s, addr);
+                writeInt32(s, 443);
+                writeInt32(s, 1);                   // ipv6 flag
+                writeTLString(s, "");
+            }
+            writeInt32(s, 0);                       // ipv4Download (empty)
+            writeInt32(s, 0);                       // ipv6Download (empty)
+
+            writeBool(s, false);                    // isCdnDatacenter
+
+            if (authKey != null) {
+                writeInt32(s, authKey.length);
+                s.write(authKey);
+                writeInt64(s, computeAuthKeyId(authKey));
+            } else {
+                writeInt32(s, 0);
+                writeInt64(s, 0L);
+            }
+            writeInt32(s, 0);                       // authKeyTemp_len
+            writeInt64(s, 0L);                      // authKeyTempId
+            writeInt32(s, 0);                       // authKeyMediaTemp_len
+            writeInt64(s, 0L);                      // authKeyMediaTempId
+
+            writeInt32(s, authKey != null ? 1 : 0); // authorized (int32)
+
+            writeInt32(s, 0);                       // serverSalts count
+            writeInt32(s, 0);                       // mediaServerSalts count
+        }
+
+        private static long computeAuthKeyId(byte[] authKey) throws Exception {
+            MessageDigest md = MessageDigest.getInstance("SHA-1");
+            byte[] hash = md.digest(authKey);
+            long id = 0L;
+            for (int i = 7; i >= 0; i--) {
+                id = (id << 8) | (hash[12 + i] & 0xFFL);
+            }
+            return id;
+        }
+
+        private static void writeInt32(ByteArrayOutputStream s, int v) {
+            s.write(v & 0xFF);
+            s.write((v >>> 8) & 0xFF);
+            s.write((v >>> 16) & 0xFF);
+            s.write((v >>> 24) & 0xFF);
+        }
+
+        private static void writeInt64(ByteArrayOutputStream s, long v) {
+            for (int i = 0; i < 8; i++) {
+                s.write((int)((v >>> (i * 8)) & 0xFF));
+            }
+        }
+
+        private static void writeBool(ByteArrayOutputStream s, boolean v) {
+            writeInt32(s, v ? BOOL_TRUE : BOOL_FALSE);
+        }
+
+        private static void writeTLString(ByteArrayOutputStream s, String str) throws Exception {
+            byte[] b = str.getBytes("UTF-8");
+            writeTLByteArray(s, b);
+        }
+
+        private static void writeTLByteArray(ByteArrayOutputStream s, byte[] b) throws Exception {
+            int len = b.length;
+            int prefixLen;
+            if (len <= 253) {
+                s.write(len & 0xFF);
+                prefixLen = 1;
+            } else {
+                s.write(254);
+                s.write(len & 0xFF);
+                s.write((len >>> 8) & 0xFF);
+                s.write((len >>> 16) & 0xFF);
+                prefixLen = 4;
+            }
+            s.write(b);
+            int total = len + prefixLen;
+            int padding = (4 - (total % 4)) % 4;
+            for (int i = 0; i < padding; i++) s.write(0);
         }
     }
