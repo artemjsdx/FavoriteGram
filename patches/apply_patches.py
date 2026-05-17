@@ -485,6 +485,92 @@ def patch_all_get_current_user_bot():
         log(f"  total fixed: {total} occurrence(s) across all files")
 
 
+# --- 16. FIX: SharedMediaLayout preloader null-check (Profile crash) ---
+def patch_shared_media_layout_null_check():
+    log("=== Patching SharedMediaLayout: preloader null-check ===")
+    path = None
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "SharedMediaLayout.java" in files:
+            path = os.path.join(dirpath, "SharedMediaLayout.java")
+            break
+    if not path:
+        log("  ERROR: SharedMediaLayout.java not found!")
+        return
+    txt = open(path, encoding="utf-8", errors="ignore").read()
+    if "preloader != null ? preloader.getLastMediaCount()" in txt:
+        log("  already patched")
+        return
+    # Fix line ~1556: int[] mediaCount = preloader.getLastMediaCount();
+    # Fix line ~1557: topicId = sharedMediaPreloader.topicId;
+    patched = txt.replace(
+        "int[] mediaCount = preloader.getLastMediaCount();\n        topicId = sharedMediaPreloader.topicId;",
+        "int[] mediaCount = preloader != null ? preloader.getLastMediaCount() : new int[]{0,0,0,0,0,0,0,0,0};\n        topicId = sharedMediaPreloader != null ? sharedMediaPreloader.topicId : 0;"
+    )
+    if patched == txt:
+        # Try with different whitespace
+        patched = re.sub(
+            r'int\[\] mediaCount = preloader\.getLastMediaCount\(\);(\s*)topicId = sharedMediaPreloader\.topicId;',
+            r'int[] mediaCount = preloader != null ? preloader.getLastMediaCount() : new int[]{0,0,0,0,0,0,0,0,0};\1topicId = sharedMediaPreloader != null ? sharedMediaPreloader.topicId : 0;',
+            txt, count=1
+        )
+    if patched != txt:
+        open(path, "w", encoding="utf-8").write(patched)
+        log("  patched SharedMediaLayout.java: preloader null-check at getLastMediaCount()")
+    else:
+        log("  WARNING: could not find preloader.getLastMediaCount() pattern!")
+
+
+# --- 17. FIX: ProfileActivity sharedMediaPreloader null-check (line ~8384) ---
+def patch_profile_activity_preloader_null_check():
+    log("=== Patching ProfileActivity: sharedMediaPreloader null-check ===")
+    path = None
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "ProfileActivity.java" in files:
+            path = os.path.join(dirpath, "ProfileActivity.java")
+            break
+    if not path:
+        log("  ERROR: ProfileActivity.java not found!")
+        return
+    txt = open(path, encoding="utf-8", errors="ignore").read()
+    if "FavoriteGram: sharedMediaPreloader null-check" in txt:
+        log("  already patched")
+        return
+    # Fix: guard the block that starts with
+    #   if (sharedMediaLayout == null || mediaCounterTextView == null) {
+    #       return;
+    #   }
+    #   int id = sharedMediaLayout.getClosestTab();
+    #   int[] mediaCount = sharedMediaPreloader.getLastMediaCount();
+    OLD = (
+        "if (sharedMediaLayout == null || mediaCounterTextView == null) {\n"
+        "            return;\n"
+        "        }\n"
+        "        int id = sharedMediaLayout.getClosestTab();\n"
+        "        int[] mediaCount = sharedMediaPreloader.getLastMediaCount();"
+    )
+    NEW = (
+        "if (sharedMediaLayout == null || mediaCounterTextView == null) {\n"
+        "            return;\n"
+        "        }\n"
+        "        if (sharedMediaPreloader == null) return; // FavoriteGram: sharedMediaPreloader null-check\n"
+        "        int id = sharedMediaLayout.getClosestTab();\n"
+        "        int[] mediaCount = sharedMediaPreloader.getLastMediaCount();"
+    )
+    patched = txt.replace(OLD, NEW, 1)
+    if patched == txt:
+        # Try regex fallback with flexible whitespace
+        patched = re.sub(
+            r'(if\s*\(sharedMediaLayout\s*==\s*null\s*\|\|\s*mediaCounterTextView\s*==\s*null\)\s*\{\s*\n\s*return;\s*\}\s*\n)(\s*)(int id = sharedMediaLayout\.getClosestTab\(\);\s*\n\s*int\[\] mediaCount = sharedMediaPreloader\.getLastMediaCount\(\);)',
+            r'\1\2if (sharedMediaPreloader == null) return; // FavoriteGram: sharedMediaPreloader null-check\n\2\3',
+            txt, count=1
+        )
+    if patched != txt:
+        open(path, "w", encoding="utf-8").write(patched)
+        log("  patched ProfileActivity.java: added sharedMediaPreloader null-check before getLastMediaCount()")
+    else:
+        log("  WARNING: could not find ProfileActivity pattern for preloader null-check!")
+
+
 # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -502,6 +588,8 @@ if __name__ == "__main__":
     patch_messages_controller_timer()         # FIX 3: null-check in MessagesController
     patch_media_data_controller_null_check()  # FIX 4: null-check in MediaDataController
     patch_all_get_current_user_bot()          # FIX 5: universal scan — any remaining file
+    patch_shared_media_layout_null_check()    # FIX 6: SharedMediaLayout preloader NPE
+    patch_profile_activity_preloader_null_check()  # FIX 7: ProfileActivity preloader NPE
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
