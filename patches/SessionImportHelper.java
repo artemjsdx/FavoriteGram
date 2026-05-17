@@ -53,13 +53,25 @@ package org.telegram.ui;
         /** Entry point for direct file path import (debug/broadcast) */
         public static void importFromPath(Context ctx, String filePath, SessionFormat format, ImportCallback cb) {
             new Thread(() -> {
+                File tmpCopy = null;
                 try {
                     File file = new File(filePath);
                     if (!file.exists()) { errorOnUI(cb, "File not found: " + filePath); return; }
+
+                    // SELinux blocks SQLite from opening external files directly.
+                    // Copy to app cache dir first so SQLite can access it.
+                    tmpCopy = new File(ctx.getCacheDir(), "import_session_tmp.db");
+                    try (FileInputStream fis = new FileInputStream(file);
+                         FileOutputStream fos = new FileOutputStream(tmpCopy)) {
+                        byte[] buf = new byte[8192]; int n;
+                        while ((n = fis.read(buf)) != -1) fos.write(buf, 0, n);
+                    }
+                    File workFile = tmpCopy;
+
                     switch (format) {
-                        case TELETHON:  importTelethonFile(ctx, file, cb); break;
-                        case PYROGRAM:  importPyrogramFile(ctx, file, cb); break;
-                        case JSON:      importJsonFile(file, ctx, cb);     break;
+                        case TELETHON:  importTelethonFile(ctx, workFile, cb); break;
+                        case PYROGRAM:  importPyrogramFile(ctx, workFile, cb); break;
+                        case JSON:      importJsonFile(workFile, ctx, cb);     break;
                         case TDATA:
                             AndroidUtilities.runOnUIThread(() ->
                                 Toast.makeText(ctx, "TDATA: поддержка скоро появится", Toast.LENGTH_LONG).show());
@@ -67,6 +79,8 @@ package org.telegram.ui;
                     }
                 } catch (Exception e) {
                     errorOnUI(cb, e.getMessage() != null ? e.getMessage() : "Unknown error");
+                } finally {
+                    if (tmpCopy != null) tmpCopy.delete();
                 }
             }).start();
         }
