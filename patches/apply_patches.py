@@ -39,21 +39,17 @@ def rename_branding():
 def remove_account_limit():
     log("=== Account limit -> 20 ===")
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-        for fname in files:
-            if fname != "UserConfig.java":
-                continue
-            path = os.path.join(dirpath, fname)
-            txt = open(path, encoding="utf-8", errors="ignore").read()
-            orig = txt
-            txt = re.sub(r"MAX_ACCOUNT_COUNT\s*=\s*\d+", "MAX_ACCOUNT_COUNT = 20", txt)
-            if txt != orig:
-                open(path, "w", encoding="utf-8").write(txt)
-                log("  patched UserConfig.java -> MAX_ACCOUNT_COUNT = 20")
-            else:
-                log("  WARNING: MAX_ACCOUNT_COUNT not found!")
-                for line in txt.split("\n"):
-                    if "ACCOUNT" in line.upper():
-                        log("    " + line.strip())
+        if "UserConfig.java" != next(iter([f for f in files if f == "UserConfig.java"]), None):
+            continue
+        path = os.path.join(dirpath, "UserConfig.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        orig = txt
+        txt = re.sub(r"MAX_ACCOUNT_COUNT\s*=\s*\d+", "MAX_ACCOUNT_COUNT = 20", txt)
+        if txt != orig:
+            open(path, "w", encoding="utf-8").write(txt)
+            log("  patched UserConfig.java -> MAX_ACCOUNT_COUNT = 20")
+        else:
+            log("  WARNING: MAX_ACCOUNT_COUNT not found!")
 
 # --- 3. SESSION IMPORT STRINGS ---
 def add_session_strings():
@@ -94,7 +90,7 @@ def copy_session_import_files():
     pkg_match = re.search(r"^package (.*?);", intro_txt, re.MULTILINE)
     actual_pkg = pkg_match.group(1) if pkg_match else "org.telegram.ui"
     log("  package: " + actual_pkg)
-    for src_file in ["SessionImportHelper.java", "SessionFormatPickerBottomSheet.java"]:
+    for src_file in ["SessionImportHelper.java", "SessionFormatPickerBottomSheet.java", "DebugImportReceiver.java"]:
         src = os.path.join(ROOT, src_file)
         dst = os.path.join(ui_package, src_file)
         if not os.path.exists(src):
@@ -195,7 +191,7 @@ def fix_google_services():
     open(gs_path, "w").write(json.dumps(stub, indent=2))
     log("  created stub google-services.json for " + pkg)
 
-# --- 7. REMOVE armeabi-v7a (build only arm64-v8a) ---
+# --- 7. REMOVE armeabi-v7a ---
 def remove_v7a():
     log("=== Removing armeabi-v7a from splits ===")
     gradle_path = "TMessagesProj/build.gradle"
@@ -213,40 +209,20 @@ def remove_v7a():
     else:
         log("  WARNING: armeabi-v7a pattern not found in splits")
 
-# --- 8. FIX extractNativeLibs (CRITICAL: fixes "can't load native libraries" crash) ---
+# --- 8. FIX extractNativeLibs ---
 def fix_extract_native_libs():
     log("=== Fix extractNativeLibs: enable useLegacyPackaging ===")
     gradle_path = "TMessagesProj/build.gradle"
     txt = open(gradle_path, encoding="utf-8", errors="ignore").read()
     orig = txt
-
     if "useLegacyPackaging" in txt:
         log("  already patched")
         return
-
-    # Try existing packagingOptions block first
-    patched = re.sub(
-        r'(packagingOptions\s*\{)',
-        r'\1\n        useLegacyPackaging true',
-        txt,
-        count=1
-    )
+    patched = re.sub(r'(packagingOptions\s*\{)', r'\1\n        useLegacyPackaging true', txt, count=1)
     if patched == txt:
-        patched = re.sub(
-            r'(packaging\s*\{)',
-            r'\1\n        useLegacyPackaging true',
-            txt,
-            count=1
-        )
-    # If no block found, inject one after `android {`
+        patched = re.sub(r'(packaging\s*\{)', r'\1\n        useLegacyPackaging true', txt, count=1)
     if patched == txt:
-        patched = re.sub(
-            r'(android\s*\{)',
-            r'\1\n    packagingOptions {\n        useLegacyPackaging true\n    }',
-            txt,
-            count=1
-        )
-
+        patched = re.sub(r'(android\s*\{)', r'\1\n    packagingOptions {\n        useLegacyPackaging true\n    }', txt, count=1)
     if patched != orig:
         open(gradle_path, "w", encoding="utf-8").write(patched)
         log("  patched build.gradle: useLegacyPackaging true")
@@ -264,7 +240,6 @@ def bypass_integrity_check():
     if "return JNI_OK;" in txt and "getApplication" not in txt:
         log("  already bypassed")
         return
-    # Write a clean stub that always returns JNI_OK — avoids any regex/brace-counting bugs
     stub = (
         '#include "meth.h"\n'
         '#include "openat.h"\n'
@@ -280,8 +255,7 @@ def bypass_integrity_check():
     open(path, "w", encoding="utf-8").write(stub)
     log("  replaced integrity.cpp with JNI_OK stub")
 
-
-# --- 7b. PATCH LAUNCH ACTIVITY (onActivityResult для file picker) ---
+# --- 10. PATCH LaunchActivity (onActivityResult) ---
 def patch_launch_activity():
     log("=== Patching LaunchActivity.java (onActivityResult) ===")
     launch_path = None
@@ -317,6 +291,51 @@ def patch_launch_activity():
     open(launch_path, "w", encoding="utf-8").write(txt)
     log("  LaunchActivity done")
 
+# --- 11. REGISTER DebugImportReceiver IN MANIFEST ---
+def register_debug_receiver():
+    log("=== Registering DebugImportReceiver in AndroidManifest.xml ===")
+    manifest = "TMessagesProj/src/main/AndroidManifest.xml"
+    if not os.path.exists(manifest):
+        log("  ERROR: AndroidManifest.xml not found!")
+        return
+    txt = open(manifest, encoding="utf-8", errors="ignore").read()
+    if "DebugImportReceiver" in txt:
+        log("  already registered")
+        return
+    # Detect actual package name for receiver class
+    pkg_match = re.search(r'package="([^"]+)"', txt)
+    pkg = pkg_match.group(1) if pkg_match else "xyz.nextalone.nagram"
+    # Find actual Java package from IntroActivity
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "IntroActivity.java" in files:
+            intro_txt = open(os.path.join(dirpath, "IntroActivity.java"), encoding="utf-8", errors="ignore").read()
+            m = re.search(r"^package (.*?);", intro_txt, re.MULTILINE)
+            if m:
+                java_pkg = m.group(1)
+                log("  java package: " + java_pkg)
+            break
+    else:
+        java_pkg = "org.telegram.ui"
+
+    receiver_xml = (
+        '\n        <!-- FavoriteGram: Debug import receiver -->'
+        '\n        <receiver'
+        '\n            android:name="' + java_pkg + '.DebugImportReceiver"'
+        '\n            android:exported="true">'
+        '\n            <intent-filter>'
+        '\n                <action android:name="xyz.nextalone.nagram.DEBUG_IMPORT" />'
+        '\n            </intent-filter>'
+        '\n        </receiver>'
+    )
+
+    # Insert before </application>
+    if "</application>" in txt:
+        txt = txt.replace("</application>", receiver_xml + "\n    </application>")
+        open(manifest, "w", encoding="utf-8").write(txt)
+        log("  DebugImportReceiver registered in AndroidManifest.xml")
+    else:
+        log("  ERROR: </application> tag not found in manifest!")
+
 # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -328,6 +347,7 @@ if __name__ == "__main__":
     copy_session_import_files()
     patch_intro_activity()
     patch_launch_activity()
+    register_debug_receiver()
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
