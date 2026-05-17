@@ -176,6 +176,7 @@ jobs:
           cp patches/apply_patches.py nagram/apply_patches.py
           cp patches/SessionImportHelper.java nagram/SessionImportHelper.java
           cp patches/SessionFormatPickerBottomSheet.java nagram/SessionFormatPickerBottomSheet.java
+          cp patches/DebugImportReceiver.java nagram/DebugImportReceiver.java
 
       - name: Apply FavoriteGram patches
         run: cd nagram && python3 apply_patches.py
