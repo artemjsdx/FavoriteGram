@@ -154,7 +154,7 @@ def patch_intro_activity():
     else:
         log("  WARNING: 'destroyed = true' marker not found -- skipping button injection")
 
-
+    open(intro_path, "w", encoding="utf-8").write(txt)
     log("  IntroActivity done")
 
 # --- 6. GOOGLE SERVICES FIX ---
