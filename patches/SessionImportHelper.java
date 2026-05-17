@@ -11,6 +11,7 @@ package org.telegram.ui;
     import org.telegram.messenger.AndroidUtilities;
     import org.telegram.messenger.ApplicationLoader;
     import org.telegram.messenger.UserConfig;
+    import org.telegram.tgnet.TLRPC;
 
     import java.io.ByteArrayOutputStream;
     import java.io.File;
@@ -97,9 +98,25 @@ package org.telegram.ui;
             if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
             int dcId       = c.getInt(0);
             byte[] authKey = c.getBlob(1);
-            c.close(); db.close();
+            c.close();
+
+            // Try to get user_id from entities table (Telethon stores seen entities there)
+            long userId = 0;
+            try {
+                // update_state id=0 is the main state; entities stores users/chats.
+                // The self-user entity is typically the one with the smallest positive id
+                // added first (rowid=1) after the initial connection.
+                Cursor ec = db.rawQuery(
+                    "SELECT id FROM entities WHERE id > 0 ORDER BY rowid ASC LIMIT 1", null);
+                if (ec.moveToFirst()) {
+                    userId = ec.getLong(0);
+                }
+                ec.close();
+            } catch (Exception ignored) {}
+
+            db.close();
             if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key too short"); return; }
-            applyAuthKey(ctx, dcId, authKey, cb);
+            applyAuthKey(ctx, dcId, authKey, userId, cb);
         }
 
         private static void importPyrogram(Context ctx, Uri uri, ImportCallback cb) throws Exception {
@@ -110,8 +127,14 @@ package org.telegram.ui;
         private static void importPyrogramFile(Context ctx, File file, ImportCallback cb) throws Exception {
             SQLiteDatabase db = SQLiteDatabase.openDatabase(
                 file.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
-            Cursor c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
-            if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
+            // Pyrogram v2 stores user_id directly in sessions table
+            Cursor c = db.rawQuery("SELECT dc_id, auth_key, user_id FROM sessions LIMIT 1", null);
+            if (!c.moveToFirst()) {
+                c.close();
+                // Fallback: older Pyrogram schema without user_id column
+                c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
+                if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
+            }
             int dcId = c.getInt(0);
             byte[] authKey;
             int colType = c.getType(1);
@@ -121,9 +144,13 @@ package org.telegram.ui;
                 String b64 = c.getString(1);
                 authKey = Base64.decode(b64, Base64.DEFAULT);
             }
+            long userId = 0;
+            if (c.getColumnCount() > 2 && !c.isNull(2)) {
+                userId = c.getLong(2);
+            }
             c.close(); db.close();
             if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key invalid"); return; }
-            applyAuthKey(ctx, dcId, authKey, cb);
+            applyAuthKey(ctx, dcId, authKey, userId, cb);
         }
 
         private static void importJson(Context ctx, Uri uri, ImportCallback cb) throws Exception {
@@ -146,7 +173,8 @@ package org.telegram.ui;
             if (b64.isEmpty()) { errorOnUI(cb, "auth_key missing in JSON"); return; }
             byte[] authKey = Base64.decode(b64, Base64.DEFAULT);
             if (authKey.length < 256) { errorOnUI(cb, "auth_key too short"); return; }
-            applyAuthKey(ctx, dcId, authKey, cb);
+            long userId = json.optLong("user_id", 0);
+            applyAuthKey(ctx, dcId, authKey, userId, cb);
         }
 
         private static byte[] readAllBytes(InputStream is) throws Exception {
@@ -157,7 +185,7 @@ package org.telegram.ui;
             return baos.toByteArray();
         }
 
-        private static void applyAuthKey(Context ctx, int dcId, byte[] authKey, ImportCallback cb) {
+        private static void applyAuthKey(Context ctx, int dcId, byte[] authKey, long userId, ImportCallback cb) {
             int slot = findFreeSlot();
             if (slot == -1) {
                 errorOnUI(cb, "Нет свободного слота. Максимум " + UserConfig.MAX_ACCOUNT_COUNT + " аккаунтов");
@@ -172,11 +200,30 @@ package org.telegram.ui;
                 ed.putInt("selectedDcId" + slot, dcId);
                 ed.putInt("currentDcId" + slot, dcId);
                 ed.putBoolean("account_activated" + slot, true);
+                if (userId != 0) {
+                    ed.putLong("clientUserId" + slot, userId);
+                }
                 ed.apply();
 
                 UserConfig uc = UserConfig.getInstance(slot);
                 uc.registeredForPush = false;
-                uc.saveConfig(false);
+
+                // If we know the user ID, set a minimal user object so getCurrentUser()
+                // doesn't return null until the real data arrives from Telegram servers.
+                if (userId != 0) {
+                    try {
+                        TLRPC.TL_user minUser = new TLRPC.TL_user();
+                        minUser.id = userId;
+                        minUser.self = true;
+                        minUser.first_name = "...";
+                        uc.setCurrentUser(minUser);
+                        uc.saveConfig(true);
+                    } catch (Exception ignored) {
+                        uc.saveConfig(false);
+                    }
+                } else {
+                    uc.saveConfig(false);
+                }
 
                 final int finalSlot = slot;
                 AndroidUtilities.runOnUIThread(() -> cb.onSuccess(finalSlot));
