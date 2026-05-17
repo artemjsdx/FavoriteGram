@@ -449,6 +449,7 @@ if __name__ == "__main__":
     register_debug_receiver()
     patch_user_config_is_activated()   # FIX 1: isClientActivated check
     patch_login_phone_view()           # FIX 2: button in Add Account
+    patch_messages_controller_timer()  # FIX 3: null-check in updateTimerProc
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
