@@ -403,6 +403,38 @@ def patch_login_phone_view():
         open(login_path, "w", encoding="utf-8").write(patched)
         log("  LoginActivity patched")
 
+
+# --- 13. FIX: Patch MessagesController.updateTimerProc() null-check ---
+def patch_messages_controller_timer():
+    log("=== Patching MessagesController.updateTimerProc() null-check ===")
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "MessagesController.java" not in files:
+            continue
+        path = os.path.join(dirpath, "MessagesController.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        if "getCurrentUser() != null && !getUserConfig().getCurrentUser().bot" in txt:
+            log("  already patched")
+            return
+        # Fix: isClientActivated() && !getCurrentUser().bot  -> add null check
+        patched = txt.replace(
+            "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot",
+            "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+        )
+        if patched == txt:
+            # Fallback: broader pattern search
+            import re
+            patched = re.sub(
+                r'(isClientActivated\(\)\s*&&\s*)(!getUserConfig\(\)\.getCurrentUser\(\)\.bot)',
+                r'\1getUserConfig().getCurrentUser() != null && \2',
+                txt
+            )
+        if patched != txt:
+            open(path, "w", encoding="utf-8").write(patched)
+            log("  patched MessagesController.java: added getCurrentUser() != null check")
+        else:
+            log("  WARNING: could not find updateTimerProc pattern in MessagesController.java!")
+        return
+
 # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
