@@ -13,6 +13,7 @@ package org.telegram.ui;
 
     import java.io.ByteArrayOutputStream;
     import java.io.File;
+    import java.io.FileInputStream;
     import java.io.FileOutputStream;
     import java.io.InputStream;
 
@@ -29,6 +30,7 @@ package org.telegram.ui;
             AndroidUtilities.runOnUIThread(() -> cb.onError(msg));
         }
 
+        /** Entry point for normal URI-based import (from file picker) */
         public static void importSession(Context ctx, Uri uri, SessionFormat format, ImportCallback cb) {
             new Thread(() -> {
                 try {
@@ -38,7 +40,28 @@ package org.telegram.ui;
                         case JSON:      importJson(ctx, uri, cb);     break;
                         case TDATA:
                             AndroidUtilities.runOnUIThread(() ->
-                                Toast.makeText(ctx, "TDATA: \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430 \u0441\u043a\u043e\u0440\u043e \u043f\u043e\u044f\u0432\u0438\u0442\u0441\u044f", Toast.LENGTH_LONG).show());
+                                Toast.makeText(ctx, "TDATA: поддержка скоро появится", Toast.LENGTH_LONG).show());
+                            break;
+                    }
+                } catch (Exception e) {
+                    errorOnUI(cb, e.getMessage() != null ? e.getMessage() : "Unknown error");
+                }
+            }).start();
+        }
+
+        /** Entry point for direct file path import (debug/broadcast) */
+        public static void importFromPath(Context ctx, String filePath, SessionFormat format, ImportCallback cb) {
+            new Thread(() -> {
+                try {
+                    File file = new File(filePath);
+                    if (!file.exists()) { errorOnUI(cb, "File not found: " + filePath); return; }
+                    switch (format) {
+                        case TELETHON:  importTelethonFile(ctx, file, cb); break;
+                        case PYROGRAM:  importPyrogramFile(ctx, file, cb); break;
+                        case JSON:      importJsonFile(file, ctx, cb);     break;
+                        case TDATA:
+                            AndroidUtilities.runOnUIThread(() ->
+                                Toast.makeText(ctx, "TDATA: поддержка скоро появится", Toast.LENGTH_LONG).show());
                             break;
                     }
                 } catch (Exception e) {
@@ -50,38 +73,46 @@ package org.telegram.ui;
         private static void importTelethon(Context ctx, Uri uri, ImportCallback cb) throws Exception {
             File tmp = copyToTemp(ctx, uri, "tl_session.db");
             try {
-                SQLiteDatabase db = SQLiteDatabase.openDatabase(
-                    tmp.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
-                Cursor c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
-                if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
-                int dcId       = c.getInt(0);
-                byte[] authKey = c.getBlob(1);
-                c.close(); db.close();
-                if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key too short"); return; }
-                applyAuthKey(ctx, dcId, authKey, cb);
+                importTelethonFile(ctx, tmp, cb);
             } finally { tmp.delete(); }
+        }
+
+        private static void importTelethonFile(Context ctx, File file, ImportCallback cb) throws Exception {
+            SQLiteDatabase db = SQLiteDatabase.openDatabase(
+                file.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
+            Cursor c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
+            if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
+            int dcId       = c.getInt(0);
+            byte[] authKey = c.getBlob(1);
+            c.close(); db.close();
+            if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key too short"); return; }
+            applyAuthKey(ctx, dcId, authKey, cb);
         }
 
         private static void importPyrogram(Context ctx, Uri uri, ImportCallback cb) throws Exception {
             File tmp = copyToTemp(ctx, uri, "pyro_session.db");
             try {
-                SQLiteDatabase db = SQLiteDatabase.openDatabase(
-                    tmp.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
-                Cursor c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
-                if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
-                int dcId = c.getInt(0);
-                byte[] authKey;
-                int colType = c.getType(1);
-                if (colType == Cursor.FIELD_TYPE_BLOB) {
-                    authKey = c.getBlob(1);
-                } else {
-                    String b64 = c.getString(1);
-                    authKey = Base64.decode(b64, Base64.DEFAULT);
-                }
-                c.close(); db.close();
-                if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key invalid"); return; }
-                applyAuthKey(ctx, dcId, authKey, cb);
+                importPyrogramFile(ctx, tmp, cb);
             } finally { tmp.delete(); }
+        }
+
+        private static void importPyrogramFile(Context ctx, File file, ImportCallback cb) throws Exception {
+            SQLiteDatabase db = SQLiteDatabase.openDatabase(
+                file.getAbsolutePath(), null, SQLiteDatabase.OPEN_READONLY);
+            Cursor c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
+            if (!c.moveToFirst()) { c.close(); db.close(); errorOnUI(cb, "sessions table is empty"); return; }
+            int dcId = c.getInt(0);
+            byte[] authKey;
+            int colType = c.getType(1);
+            if (colType == Cursor.FIELD_TYPE_BLOB) {
+                authKey = c.getBlob(1);
+            } else {
+                String b64 = c.getString(1);
+                authKey = Base64.decode(b64, Base64.DEFAULT);
+            }
+            c.close(); db.close();
+            if (authKey == null || authKey.length < 256) { errorOnUI(cb, "auth_key invalid"); return; }
+            applyAuthKey(ctx, dcId, authKey, cb);
         }
 
         private static void importJson(Context ctx, Uri uri, ImportCallback cb) throws Exception {
@@ -89,6 +120,15 @@ package org.telegram.ui;
             if (is == null) { errorOnUI(cb, "Cannot open file"); return; }
             byte[] data = readAllBytes(is);
             is.close();
+            parseAndImportJson(ctx, data, cb);
+        }
+
+        private static void importJsonFile(File file, Context ctx, ImportCallback cb) throws Exception {
+            byte[] data = readAllBytes(new FileInputStream(file));
+            parseAndImportJson(ctx, data, cb);
+        }
+
+        private static void parseAndImportJson(Context ctx, byte[] data, ImportCallback cb) throws Exception {
             JSONObject json = new JSONObject(new String(data));
             int dcId = json.optInt("dc_id", 2);
             String b64 = json.optString("auth_key", "");
@@ -111,7 +151,7 @@ package org.telegram.ui;
         private static void applyAuthKey(Context ctx, int dcId, byte[] authKey, ImportCallback cb) {
             int slot = findFreeSlot();
             if (slot == -1) {
-                errorOnUI(cb, "\u041d\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u0441\u043b\u043e\u0442\u0430. \u041c\u0430\u043a\u0441\u0438\u043c\u0443\u043c " + UserConfig.MAX_ACCOUNT_COUNT + " \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432");
+                errorOnUI(cb, "Нет свободного слота. Максимум " + UserConfig.MAX_ACCOUNT_COUNT + " аккаунтов");
                 return;
             }
             try {
@@ -155,4 +195,3 @@ package org.telegram.ui;
             return tmp;
         }
     }
-  
