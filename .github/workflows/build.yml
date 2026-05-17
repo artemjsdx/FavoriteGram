@@ -1,189 +1,221 @@
 name: Build FavoriteGram APK
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  on:
+    push:
+      branches: [main]
+    workflow_dispatch:
 
-jobs:
-  build:
-    name: Build APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - name: Checkout FavoriteGram
-        uses: actions/checkout@v4
+  jobs:
+    build:
+      name: Build APK
+      runs-on: ubuntu-latest
+      timeout-minutes: 180
+      steps:
+        - name: Checkout FavoriteGram
+          uses: actions/checkout@v4
 
-      - name: Clone Nagram
-        run: |
-          git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
-          cd nagram && sed -i 's/\/\///g' settings.gradle
+        - name: Clone Nagram
+          run: |
+            git clone --depth=1 https://github.com/NextAlone/Nagram.git nagram
+            cd nagram && sed -i 's/\/\///g' settings.gradle
 
-      - name: Compute cache keys
-        id: keys
-        run: |
-          FF=$(cat nagram/TMessagesProj/jni/build_ffmpeg_clang.sh nagram/TMessagesProj/jni/build_libvpx_clang.sh | sha256sum | cut -c1-16)
-          BS=$(cat nagram/TMessagesProj/jni/build_boringssl.sh | sha256sum | cut -c1-16)
-          echo "ffmpeg=$FF" >> $GITHUB_OUTPUT
-          echo "boringssl=$BS" >> $GITHUB_OUTPUT
-          echo "FFmpeg key: $FF  BoringSSL key: $BS"
+        - name: Compute cache keys
+          id: keys
+          run: |
+            FF=$(cat nagram/TMessagesProj/jni/build_ffmpeg_clang.sh nagram/TMessagesProj/jni/build_libvpx_clang.sh | sha256sum | cut -c1-16)
+            BS=$(cat nagram/TMessagesProj/jni/build_boringssl.sh | sha256sum | cut -c1-16)
+            echo "ffmpeg=$FF" >> $GITHUB_OUTPUT
+            echo "boringssl=$BS" >> $GITHUB_OUTPUT
+            echo "FFmpeg key: $FF  BoringSSL key: $BS"
 
-      - name: Cache FFmpeg + libvpx
-        id: cache-ffmpeg
-        uses: actions/cache@v4
-        with:
-          path: |
-            nagram/TMessagesProj/jni/ffmpeg/build
-            nagram/TMessagesProj/jni/libvpx/build
-          key: v5-ffmpeg-ndk21-${{ steps.keys.outputs.ffmpeg }}
+        - name: Cache FFmpeg + libvpx
+          id: cache-ffmpeg
+          uses: actions/cache@v4
+          with:
+            path: |
+              nagram/TMessagesProj/jni/ffmpeg/build
+              nagram/TMessagesProj/jni/libvpx/build
+            key: v5-ffmpeg-ndk21-${{ steps.keys.outputs.ffmpeg }}
 
-      - name: Cache BoringSSL
-        id: cache-boringssl
-        uses: actions/cache@v4
-        with:
-          path: nagram/TMessagesProj/jni/boringssl/build
-          key: v5-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
+        - name: Cache BoringSSL
+          id: cache-boringssl
+          uses: actions/cache@v4
+          with:
+            path: nagram/TMessagesProj/jni/boringssl/build
+            key: v5-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: temurin
-
-      - name: Install NDK 21
-        run: |
-          SDKROOT=/usr/local/lib/android/sdk
-          SDKMGR="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
-          echo "y" | "$SDKMGR" --install "ndk;21.4.7075529" > /dev/null
-          echo "sdk.dir=$SDKROOT" > nagram/local.properties
-          echo "ndk.dir=$SDKROOT/ndk/21.4.7075529" >> nagram/local.properties
-          echo "MAPS_API_KEY=AIzaFakeKeyForDebug" >> nagram/local.properties
-          echo "ANDROID_HOME=$SDKROOT" >> $GITHUB_ENV
-          cat nagram/local.properties
-
-      - name: Patch debug signingConfig
-        run: |
-          python3 << 'PYEOF'
-          import re, pathlib
-          p = pathlib.Path('nagram/TMessagesProj/build.gradle')
-          text = p.read_text()
-          fixed = re.sub(
-              r'(debug\s*\{[^}]*?)(\s*signingConfig signingConfigs\.release)',
-              r'\1',
-              text,
-              count=1
-          )
-          p.write_text(fixed)
-          print('Patched debug signingConfig OK')
-          PYEOF
-
-      - name: Init native submodules (if needed)
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
-        run: |
-          cd nagram
-          MODS=""
-          if [ "${{ steps.cache-ffmpeg.outputs.cache-hit }}" != "true" ]; then
-            MODS="$MODS TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx"
-          fi
-          if [ "${{ steps.cache-boringssl.outputs.cache-hit }}" != "true" ]; then
-            MODS="$MODS TMessagesProj/jni/boringssl"
-          fi
-          git submodule update --init --depth=1 $MODS
-
-      - name: Install native build tools
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
-        run: sudo apt-get install -y bison gcc make curl ninja-build yasm cmake
-
-      - name: Build FFmpeg + libvpx
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          cd nagram
-          chmod +x ./run
-          ./run init action ffmpeg
-          ./run init libs libvpx
-          ./run init libs ffmpeg
-
-      - name: Build BoringSSL
-        if: steps.cache-boringssl.outputs.cache-hit != 'true'
-        run: |
-          cd nagram
-          chmod +x ./run
-          ./run init action boringssl
-          ./run init libs boringssl
-
-      - name: Verify native libs
-        run: |
-          echo "=== FFmpeg ===" && find nagram/TMessagesProj/jni/ffmpeg/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
-          echo "=== libvpx ===" && find nagram/TMessagesProj/jni/libvpx/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
-          echo "=== BoringSSL ===" && find nagram/TMessagesProj/jni/boringssl/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
-
-      - name: Init remaining submodules
-        run: |
-          cd nagram
-          # Cache restores only the build/ subdir, creating stub parent dirs without .git
-          # Remove those stubs so git submodule update can clone properly
-          for d in TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx; do
-            if [ -d "$d" ] && [ ! -d "$d/.git" ] && [ ! -f "$d/.git" ]; then
-              echo "Removing cache stub: $d"
-              rm -rf "$d"
+        - name: Preserve cached native libs before submodule init
+          run: |
+            # Cache restores build/ into jni/ffmpeg/build etc., but the next step removes
+            # parent dirs without .git — so we back up cached libs to /tmp first.
+            if [ "${{ steps.cache-ffmpeg.outputs.cache-hit }}" = "true" ]; then
+              mkdir -p /tmp/native-cache
+              cp -r nagram/TMessagesProj/jni/ffmpeg/build /tmp/native-cache/ffmpeg-build 2>/dev/null && echo "Backed up ffmpeg/build" || echo "ffmpeg/build not found (ok if first run)"
+              cp -r nagram/TMessagesProj/jni/libvpx/build /tmp/native-cache/libvpx-build 2>/dev/null && echo "Backed up libvpx/build" || true
             fi
-          done
-          git submodule update --init --recursive --depth=1
+            if [ "${{ steps.cache-boringssl.outputs.cache-hit }}" = "true" ]; then
+              mkdir -p /tmp/native-cache
+              cp -r nagram/TMessagesProj/jni/boringssl/build /tmp/native-cache/boringssl-build 2>/dev/null && echo "Backed up boringssl/build" || true
+            fi
 
-      - name: Install ImageMagick
-        run: sudo apt-get install -y imagemagick
+        - name: Set up JDK 17
+          uses: actions/setup-java@v4
+          with:
+            java-version: "17"
+            distribution: temurin
 
-      - name: Copy patch files
-        run: |
-          cp icon.jpg nagram/icon.jpg
-          cp patches/apply_patches.py nagram/apply_patches.py
-          cp patches/SessionImportHelper.java nagram/SessionImportHelper.java
-          cp patches/SessionFormatPickerBottomSheet.java nagram/SessionFormatPickerBottomSheet.java
+        - name: Install NDK 21
+          run: |
+            SDKROOT=/usr/local/lib/android/sdk
+            SDKMGR="$SDKROOT/cmdline-tools/latest/bin/sdkmanager"
+            echo "y" | "$SDKMGR" --install "ndk;21.4.7075529" > /dev/null
+            echo "sdk.dir=$SDKROOT" > nagram/local.properties
+            echo "ndk.dir=$SDKROOT/ndk/21.4.7075529" >> nagram/local.properties
+            echo "MAPS_API_KEY=AIzaFakeKeyForDebug" >> nagram/local.properties
+            echo "ANDROID_HOME=$SDKROOT" >> $GITHUB_ENV
+            cat nagram/local.properties
 
-      - name: Apply FavoriteGram patches
-        run: cd nagram && python3 apply_patches.py
+        - name: Patch debug signingConfig
+          run: |
+            python3 << 'PYEOF'
+            import re, pathlib
+            p = pathlib.Path('nagram/TMessagesProj/build.gradle')
+            text = p.read_text()
+            fixed = re.sub(
+                r'(debug\s*\{[^}]*?)(\s*signingConfig signingConfigs\.release)',
+                r'\1',
+                text,
+                count=1
+            )
+            p.write_text(fixed)
+            print('Patched debug signingConfig OK')
+            PYEOF
 
-      - name: Replace launcher icons
-        run: |
-          cd nagram
-          BASE=TMessagesProj/src/main/res
-          for D_SIZE in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
-            D=${D_SIZE%%:*}; S=${D_SIZE##*:}
-            for F in "$BASE/$D"/ic_launcher*.png; do
-              [ -f "$F" ] && convert icon.jpg -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$F" && echo "OK: $F" || true
+        - name: Init native submodules (if needed)
+          if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
+          run: |
+            cd nagram
+            MODS=""
+            if [ "${{ steps.cache-ffmpeg.outputs.cache-hit }}" != "true" ]; then
+              MODS="$MODS TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx"
+            fi
+            if [ "${{ steps.cache-boringssl.outputs.cache-hit }}" != "true" ]; then
+              MODS="$MODS TMessagesProj/jni/boringssl"
+            fi
+            git submodule update --init --depth=1 $MODS
+
+        - name: Install native build tools
+          if: steps.cache-ffmpeg.outputs.cache-hit != 'true' || steps.cache-boringssl.outputs.cache-hit != 'true'
+          run: sudo apt-get install -y bison gcc make curl ninja-build yasm cmake
+
+        - name: Build FFmpeg + libvpx
+          if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+          run: |
+            cd nagram
+            chmod +x ./run
+            ./run init action ffmpeg
+            ./run init libs libvpx
+            ./run init libs ffmpeg
+
+        - name: Build BoringSSL
+          if: steps.cache-boringssl.outputs.cache-hit != 'true'
+          run: |
+            cd nagram
+            chmod +x ./run
+            ./run init action boringssl
+            ./run init libs boringssl
+
+        - name: Init remaining submodules
+          run: |
+            cd nagram
+            # Remove stub dirs without .git so git submodule update can clone properly
+            for d in TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx; do
+              if [ -d "$d" ] && [ ! -d "$d/.git" ] && [ ! -f "$d/.git" ]; then
+                echo "Removing stub (no .git): $d"
+                rm -rf "$d"
+              fi
             done
-          done
+            git submodule update --init --recursive --depth=1
 
-      - name: Make gradlew executable
-        run: chmod +x nagram/gradlew
+        - name: Restore cached native libs after submodule init
+          run: |
+            if [ -d /tmp/native-cache/ffmpeg-build ]; then
+              mkdir -p nagram/TMessagesProj/jni/ffmpeg
+              cp -r /tmp/native-cache/ffmpeg-build nagram/TMessagesProj/jni/ffmpeg/build
+              echo "Restored ffmpeg/build from cache"
+            fi
+            if [ -d /tmp/native-cache/libvpx-build ]; then
+              mkdir -p nagram/TMessagesProj/jni/libvpx
+              cp -r /tmp/native-cache/libvpx-build nagram/TMessagesProj/jni/libvpx/build
+              echo "Restored libvpx/build from cache"
+            fi
+            if [ -d /tmp/native-cache/boringssl-build ]; then
+              mkdir -p nagram/TMessagesProj/jni/boringssl
+              cp -r /tmp/native-cache/boringssl-build nagram/TMessagesProj/jni/boringssl/build
+              echo "Restored boringssl/build from cache"
+            fi
 
-      - name: Build Debug APK
-        run: |
-          cd nagram
-          set -o pipefail
-          ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test 2>&1 | tee /tmp/gradle.log
+        - name: Verify native libs
+          run: |
+            echo "=== FFmpeg ===" && find nagram/TMessagesProj/jni/ffmpeg/build -name "*.a" 2>/dev/null | head -10 || echo MISSING
+            echo "=== libvpx ===" && find nagram/TMessagesProj/jni/libvpx/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
+            echo "=== BoringSSL ===" && find nagram/TMessagesProj/jni/boringssl/build -name "*.a" 2>/dev/null | head -5 || echo MISSING
 
-      - name: Show Gradle errors (always)
-        if: always()
-        run: |
-          echo "=== ERRORS/FAILURES ==="
-          grep -E "error:|FAILED|Exception|error:" /tmp/gradle.log 2>/dev/null | tail -100 || echo "(no log file)"
+        - name: Install ImageMagick
+          run: sudo apt-get install -y imagemagick
 
-      - name: Upload Gradle log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-log
-          path: /tmp/gradle.log
-          retention-days: 3
+        - name: Copy patch files
+          run: |
+            cp icon.jpg nagram/icon.jpg
+            cp patches/apply_patches.py nagram/apply_patches.py
+            cp patches/SessionImportHelper.java nagram/SessionImportHelper.java
+            cp patches/SessionFormatPickerBottomSheet.java nagram/SessionFormatPickerBottomSheet.java
 
-      - name: Find APKs
-        run: find nagram -name "*.apk"
+        - name: Apply FavoriteGram patches
+          run: cd nagram && python3 apply_patches.py
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: FavoriteGram-debug
-          path: nagram/**/outputs/apk/**/*.apk
-          if-no-files-found: error
-          retention-days: 30
+        - name: Replace launcher icons
+          run: |
+            cd nagram
+            BASE=TMessagesProj/src/main/res
+            for D_SIZE in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
+              D=${D_SIZE%%:*}; S=${D_SIZE##*:}
+              for F in "$BASE/$D"/ic_launcher*.png; do
+                [ -f "$F" ] && convert icon.jpg -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$F" && echo "OK: $F" || true
+              done
+            done
+
+        - name: Make gradlew executable
+          run: chmod +x nagram/gradlew
+
+        - name: Build Debug APK
+          run: |
+            cd nagram
+            set -o pipefail
+            ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace -x lint -x lintDebug -x test 2>&1 | tee /tmp/gradle.log
+
+        - name: Show Gradle errors (always)
+          if: always()
+          run: |
+            echo "=== ERRORS/FAILURES ==="
+            grep -E "error:|FAILED|Exception|error:" /tmp/gradle.log 2>/dev/null | tail -100 || echo "(no log file)"
+
+        - name: Upload Gradle log
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+            name: gradle-log
+            path: /tmp/gradle.log
+            retention-days: 3
+
+        - name: Find APKs
+          run: find nagram -name "*.apk"
+
+        - name: Upload APK
+          uses: actions/upload-artifact@v4
+          with:
+            name: FavoriteGram-debug
+            path: nagram/**/outputs/apk/**/*.apk
+            if-no-files-found: error
+            retention-days: 30
+  
