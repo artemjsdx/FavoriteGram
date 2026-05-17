@@ -417,15 +417,14 @@ def patch_messages_controller_timer():
 
         # Strategy A: local-variable replacement (race-condition-safe)
         SA_RE = re.compile(
-            r'([ 	]*)(ifs*(s*getUserConfig().isClientActivated()s*&&s*!getUserConfig().getCurrentUser().bots*)s*{)',
+            r'([ \t]*)(if\s*\(\s*getUserConfig\(\)\.isClientActivated\(\)\s*&&\s*!getUserConfig\(\)\.getCurrentUser\(\)\.bot\s*\)\s*\{)',
             re.DOTALL
         )
         if "FG11_LOCAL" not in txt:
             def sa_replace(m):
                 indent = m.group(1)
                 return (
-                    indent + "final org.telegram.tgnet.TLRPC.User _fgU11 = getUserConfig().getCurrentUser(); // FG11_LOCAL
-"
+                    indent + "final org.telegram.tgnet.TLRPC.User _fgU11 = getUserConfig().getCurrentUser(); // FG11_LOCAL\n"
                     + indent + "if (getUserConfig().isClientActivated() && _fgU11 != null && !_fgU11.bot) {"
                 )
             patched = SA_RE.sub(sa_replace, txt, count=1)
@@ -446,14 +445,13 @@ def patch_messages_controller_timer():
         else:
             log("  Strategy A: FG11_LOCAL already present")
 
-        # Strategy B: guard at start — flexible regex (handles @Override, newline-{, any modifier)
+        # Strategy B: guard at start of updateTimerProc() — flexible regex
         if "FG11_GUARD" not in txt:
             SB_RE = re.compile(
-                r'((?:@w+s+)*(?:public|protected|private)?s*voids+updateTimerProcs*(s*))s*({)',
+                r'((?:@\w+\s+)*(?:public|protected|private)?\s*void\s+updateTimerProc\s*\(\s*\))\s*(\{)',
                 re.MULTILINE | re.DOTALL
             )
-            GUARD = "
-        if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
+            GUARD = "\n        if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
             patched = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + GUARD, txt, count=1)
             if patched != txt:
                 txt = patched
@@ -464,7 +462,7 @@ def patch_messages_controller_timer():
         else:
             log("  Strategy B: FG11_GUARD already present")
 
-        # Strategy C: nuclear fallback — replace any !getCurrentUser().bot without guard
+        # Strategy C: nuclear — any !getCurrentUser().bot without null-check
         if "FG11_LOCAL" not in txt and "FG11_GUARD" not in txt:
             C_PAT = "!getUserConfig().getCurrentUser().bot"
             C_FIX = "(getUserConfig().getCurrentUser() == null || !getUserConfig().getCurrentUser().bot)"
@@ -481,8 +479,6 @@ def patch_messages_controller_timer():
         else:
             log("  WARNING FIX11: NO changes made")
         return
-
-      return
 
 # --- 14. FIX: Patch MediaDataController.loadStickers() null-check ---
 def patch_media_data_controller_null_check():
