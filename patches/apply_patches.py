@@ -435,6 +435,56 @@ def patch_messages_controller_timer():
             log("  WARNING: could not find updateTimerProc pattern in MessagesController.java!")
         return
 
+# --- 14. FIX: Patch MediaDataController.loadStickers() null-check ---
+def patch_media_data_controller_null_check():
+    log("=== Patching MediaDataController.loadStickers() null-check ===")
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "MediaDataController.java" not in files:
+            continue
+        path = os.path.join(dirpath, "MediaDataController.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        if txt.count("getCurrentUser() != null && !getUserConfig().getCurrentUser().bot") >= 2:
+            log("  already patched (found 2+ null-checks)")
+            return
+        # Fix all occurrences: isClientActivated() && !getCurrentUser().bot -> add null check
+        patched = txt.replace(
+            "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot",
+            "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+        )
+        count = txt.count("getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot")
+        if patched != txt:
+            open(path, "w", encoding="utf-8").write(patched)
+            log(f"  patched MediaDataController.java: fixed {count} occurrence(s) with getCurrentUser() != null check")
+        else:
+            log("  WARNING: could not find loadStickers null-check pattern in MediaDataController.java!")
+        return
+
+
+# --- 15. FIX: Universal null-check scan — patch ANY file with getCurrentUser().bot without guard ---
+def patch_all_get_current_user_bot():
+    log("=== Universal scan: patching all getCurrentUser().bot without null-check ===")
+    import re
+    PATTERN = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
+    FIXED   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+    total = 0
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        for fname in files:
+            if not fname.endswith(".java"):
+                continue
+            path = os.path.join(dirpath, fname)
+            txt = open(path, encoding="utf-8", errors="ignore").read()
+            if PATTERN in txt:
+                count = txt.count(PATTERN)
+                patched = txt.replace(PATTERN, FIXED)
+                open(path, "w", encoding="utf-8").write(patched)
+                log(f"  patched {fname}: {count} occurrence(s)")
+                total += count
+    if total == 0:
+        log("  no remaining unguarded occurrences found")
+    else:
+        log(f"  total fixed: {total} occurrence(s) across all files")
+
+
 # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -447,9 +497,11 @@ if __name__ == "__main__":
     patch_intro_activity()
     patch_launch_activity()
     register_debug_receiver()
-    patch_user_config_is_activated()   # FIX 1: isClientActivated check
-    patch_login_phone_view()           # FIX 2: button in Add Account
-    patch_messages_controller_timer()  # FIX 3: null-check in updateTimerProc
+    patch_user_config_is_activated()          # FIX 1: isClientActivated check
+    patch_login_phone_view()                  # FIX 2: button in Add Account
+    patch_messages_controller_timer()         # FIX 3: null-check in MessagesController
+    patch_media_data_controller_null_check()  # FIX 4: null-check in MediaDataController
+    patch_all_get_current_user_bot()          # FIX 5: universal scan — any remaining file
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
