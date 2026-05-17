@@ -21,7 +21,6 @@ package org.telegram.ui;
       private static final int REQUEST_SESSION_FILE = 9901;
       private final Context ctx;
 
-      /** Получить resource ID строки без импорта класса R */
       private static int rid(Context ctx, String name) {
           return ctx.getResources().getIdentifier(name, "string", ctx.getPackageName());
       }
@@ -103,8 +102,23 @@ package org.telegram.ui;
       private static void importMultiple(Context ctx, List<Uri> uris,
               SessionImportHelper.SessionFormat fmt, int index, int[] successCount) {
           if (index >= uris.size()) {
-              Toast.makeText(ctx, "Добавлено аккаунтов: " + successCount[0],
-                  Toast.LENGTH_LONG).show();
+              final int count = successCount[0];
+              Toast.makeText(ctx, "Добавлено аккаунтов: " + count, Toast.LENGTH_LONG).show();
+              if (count > 0) {
+                  // Restart the app after 1.5s so Nagram picks up the new session
+                  new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                      try {
+                          Intent launchIntent = ctx.getPackageManager()
+                              .getLaunchIntentForPackage(ctx.getPackageName());
+                          if (launchIntent != null) {
+                              launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                  | Intent.FLAG_ACTIVITY_NEW_TASK);
+                              ctx.startActivity(launchIntent);
+                          }
+                      } catch (Exception ignored) {}
+                      android.os.Process.killProcess(android.os.Process.myPid());
+                  }, 1500);
+              }
               return;
           }
           SessionImportHelper.importSession(ctx, uris.get(index), fmt,
@@ -122,4 +136,3 @@ package org.telegram.ui;
               });
       }
   }
-  
