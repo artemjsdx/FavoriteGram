@@ -579,50 +579,51 @@ def patch_profile_activity_preloader_null_check():
 
 
 
-# --- 18. FIX8: SharedMediaLayout.fillMediaData() — preloader.getSharedMediaData() NPE ---
-def patch_shared_media_layout_fill_media_data():
-    log("=== FIX8: Patching SharedMediaLayout.fillMediaData() preloader null-check ===")
-    import re
-    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-        if "SharedMediaLayout.java" not in files:
-            continue
-        path = os.path.join(dirpath, "SharedMediaLayout.java")
-        txt = open(path, encoding="utf-8", errors="ignore").read()
-        if "FG_FIX8" in txt:
-            log("  already patched")
-            return
+# --- 18. FIX8: SharedMediaLayout.fillMediaData() — sharedMediaPreloader NPE ---
+  def patch_shared_media_layout_fill_media_data():
+      log("=== FIX8: Patching SharedMediaLayout.fillMediaData() sharedMediaPreloader null-check ===")
+      import re as _re
+      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+          if "SharedMediaLayout.java" not in files:
+              continue
+          path = os.path.join(dirpath, "SharedMediaLayout.java")
+          txt = open(path, encoding="utf-8", errors="ignore").read()
+          if "FG_FIX8" in txt:
+              log("  already patched")
+              return
 
-        changed = False
+          changed = False
 
-        # Pattern A: guard preloader.getSharedMediaData() inline
-        if "preloader.getSharedMediaData()" in txt:
-            txt = txt.replace(
-                "preloader.getSharedMediaData()",
-                "(preloader != null ? preloader.getSharedMediaData() : null) /* FG_FIX8 */",
-            )
-            changed = True
-            log("  Pattern A: guarded all preloader.getSharedMediaData() calls")
+          # Pattern A: guard sharedMediaPreloader.getSharedMediaData() inline
+          # Real source: SharedMediaData[] mediaData = sharedMediaPreloader.getSharedMediaData();
+          if "sharedMediaPreloader.getSharedMediaData()" in txt:
+              txt = txt.replace(
+                  "sharedMediaPreloader.getSharedMediaData()",
+                  "(sharedMediaPreloader != null ? sharedMediaPreloader.getSharedMediaData() : null) /* FG_FIX8 */",
+              )
+              changed = True
+              log("  Pattern A: guarded sharedMediaPreloader.getSharedMediaData()")
 
-        # Pattern B: guard entire fillMediaData with early return at start
-        import re as _re
-        txt3 = _re.sub(
-            r'(private\s+void\s+fillMediaData\b[^{]*\{)',
-            lambda m: m.group(0) + "\n        if (preloader == null) { return; } // FG_FIX8",
-            txt, count=1
-        )
-        if txt3 != txt:
-            txt = txt3
-            changed = True
-            log("  Pattern B: early return at fillMediaData() start")
+          # Pattern B: early return false at start of fillMediaData (returns boolean, not void)
+          txt2 = _re.sub(
+              r'(private\s+boolean\s+fillMediaData\b[^{]*\{)',
+              lambda m: m.group(0) + "\n        if (sharedMediaPreloader == null) { return false; } // FG_FIX8",
+              txt, count=1
+          )
+          if txt2 != txt:
+              txt = txt2
+              changed = True
+              log("  Pattern B: early return false added to fillMediaData()")
 
-        if changed:
-            open(path, "w", encoding="utf-8").write(txt)
-            log("  SharedMediaLayout.java written with FIX8")
-        else:
-            log("  WARNING: none of the patterns matched in SharedMediaLayout.java")
-        return
+          if changed:
+              open(path, "w", encoding="utf-8").write(txt)
+              log("  SharedMediaLayout.java patched with FIX8")
+          else:
+              log("  WARNING: none of the patterns matched in SharedMediaLayout.java")
+          return
 
-# --- MAIN ---
+
+  # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     bypass_integrity_check()
