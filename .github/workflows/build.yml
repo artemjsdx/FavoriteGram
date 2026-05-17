@@ -128,6 +128,14 @@ name: Build FavoriteGram APK
         - name: Init remaining submodules
           run: |
             cd nagram
+            # Save ALL .a files (cached or freshly built) before wiping dirs
+            mkdir -p /tmp/saved-libs
+            for d in TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx TMessagesProj/jni/boringssl; do
+              if [ -d "$d/build" ]; then
+                cp -r "$d/build" "/tmp/saved-libs/$(basename $d)-build"
+                echo "Saved $d/build ($(find $d/build -name '*.a' 2>/dev/null | wc -l) .a files)"
+              fi
+            done
             # Remove stub dirs without .git so git submodule update can clone properly
             for d in TMessagesProj/jni/boringssl TMessagesProj/jni/ffmpeg TMessagesProj/jni/libvpx; do
               if [ -d "$d" ] && [ ! -d "$d/.git" ] && [ ! -f "$d/.git" ]; then
@@ -136,6 +144,14 @@ name: Build FavoriteGram APK
               fi
             done
             git submodule update --init --recursive --depth=1
+            # Restore saved .a files after submodule init overwrote dirs
+            for lib in ffmpeg libvpx boringssl; do
+              if [ -d /tmp/saved-libs/$lib-build ]; then
+                mkdir -p "TMessagesProj/jni/$lib"
+                cp -r "/tmp/saved-libs/$lib-build" "TMessagesProj/jni/$lib/build"
+                echo "Restored $lib/build ($(find TMessagesProj/jni/$lib/build -name '*.a' 2>/dev/null | wc -l) .a files)"
+              fi
+            done
 
         - name: Restore cached native libs after submodule init
           run: |
