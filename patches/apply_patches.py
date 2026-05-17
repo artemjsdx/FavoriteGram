@@ -623,6 +623,28 @@ def patch_shared_media_layout_fill_media_data():
         return
 
 
+
+
+# --- 19. FIX9: ProfileActivity.createView() — currentChat NPE at line ~5986 ---
+def patch_profile_activity_current_chat_null_check():
+    log("=== FIX9: Patching ProfileActivity.createView() currentChat null-check ===")
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "ProfileActivity.java" not in files:
+            continue
+        path = os.path.join(dirpath, "ProfileActivity.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        if "FG_FIX9" in txt:
+            log("  already patched")
+            return
+        old = "            if (currentChat.megagroup) {"
+        new = "            if (currentChat != null && currentChat.megagroup) { // FG_FIX9"
+        if old in txt:
+            open(path, "w", encoding="utf-8").write(txt.replace(old, new, 1))
+            log("  patched ProfileActivity.java: currentChat null-check before .megagroup")
+        else:
+            log("  WARNING: FIX9 pattern not found!")
+        return
+
   # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -643,6 +665,7 @@ if __name__ == "__main__":
     patch_shared_media_layout_null_check()    # FIX 6: SharedMediaLayout preloader NPE
     patch_profile_activity_preloader_null_check()  # FIX 7: ProfileActivity preloader NPE
     patch_shared_media_layout_fill_media_data()       # FIX 8: SharedMediaLayout fillMediaData NPE
+    patch_profile_activity_current_chat_null_check()   # FIX 9: ProfileActivity currentChat NPE
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
