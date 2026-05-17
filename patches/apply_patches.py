@@ -404,9 +404,9 @@ def patch_login_phone_view():
         log("  LoginActivity patched")
 
 
-# --- 13. FIX: Patch MessagesController.updateTimerProc() null-check ---
+# --- 13. FIX11: Patch MessagesController.updateTimerProc() null-check (BULLETPROOF) ---
 def patch_messages_controller_timer():
-    log("=== Patching MessagesController.updateTimerProc() null-check ===")
+    log("=== FIX11: Patching MessagesController.updateTimerProc() null-check ===")
     import re
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
         if "MessagesController.java" not in files:
@@ -414,36 +414,75 @@ def patch_messages_controller_timer():
         path = os.path.join(dirpath, "MessagesController.java")
         txt = open(path, encoding="utf-8", errors="ignore").read()
         changed = False
-        GUARD = "        if (getUserConfig().getCurrentUser() == null) return; // FG_PATCH"
-        if "FG_PATCH" not in txt:
-            patched = re.sub(
-                r'(public void updateTimerProc\(\)\s*\{)',
-                lambda m: m.group(0) + "\n" + GUARD,
-                txt,
-                count=1
-            )
+
+        # Strategy A: local-variable replacement (race-condition-safe)
+        SA_RE = re.compile(
+            r'([ 	]*)(ifs*(s*getUserConfig().isClientActivated()s*&&s*!getUserConfig().getCurrentUser().bots*)s*{)',
+            re.DOTALL
+        )
+        if "FG11_LOCAL" not in txt:
+            def sa_replace(m):
+                indent = m.group(1)
+                return (
+                    indent + "final org.telegram.tgnet.TLRPC.User _fgU11 = getUserConfig().getCurrentUser(); // FG11_LOCAL
+"
+                    + indent + "if (getUserConfig().isClientActivated() && _fgU11 != null && !_fgU11.bot) {"
+                )
+            patched = SA_RE.sub(sa_replace, txt, count=1)
             if patched != txt:
                 txt = patched
                 changed = True
-                log("  Strategy 1 OK: null-guard injected at updateTimerProc() start")
+                log("  Strategy A OK: local-var race-safe replacement applied")
             else:
-                log("  Strategy 1 FAILED: updateTimerProc() not found via regex")
+                log("  Strategy A: regex miss, trying A2 plain-string fallback")
+                PAT_A2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
+                FIX_A2 = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+                if PAT_A2 in txt:
+                    txt = txt.replace(PAT_A2, FIX_A2)
+                    changed = True
+                    log("  Strategy A2 OK: inline null-check applied")
+                else:
+                    log("  Strategy A2 FAILED: isClientActivated pattern not found")
         else:
-            log("  Strategy 1: FG_PATCH already present")
-        PATTERN2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
-        FIXED2   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
-        if PATTERN2 in txt:
-            txt = txt.replace(PATTERN2, FIXED2)
-            changed = True
-            log("  Strategy 2 OK: null-check added to isClientActivated condition")
+            log("  Strategy A: FG11_LOCAL already present")
+
+        # Strategy B: guard at start — flexible regex (handles @Override, newline-{, any modifier)
+        if "FG11_GUARD" not in txt:
+            SB_RE = re.compile(
+                r'((?:@w+s+)*(?:public|protected|private)?s*voids+updateTimerProcs*(s*))s*({)',
+                re.MULTILINE | re.DOTALL
+            )
+            GUARD = "
+        if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
+            patched = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + GUARD, txt, count=1)
+            if patched != txt:
+                txt = patched
+                changed = True
+                log("  Strategy B OK: early-return guard at updateTimerProc() start")
+            else:
+                log("  Strategy B FAILED: updateTimerProc signature not matched")
         else:
-            log("  Strategy 2: pattern already patched or not found")
+            log("  Strategy B: FG11_GUARD already present")
+
+        # Strategy C: nuclear fallback — replace any !getCurrentUser().bot without guard
+        if "FG11_LOCAL" not in txt and "FG11_GUARD" not in txt:
+            C_PAT = "!getUserConfig().getCurrentUser().bot"
+            C_FIX = "(getUserConfig().getCurrentUser() == null || !getUserConfig().getCurrentUser().bot)"
+            if C_PAT in txt:
+                txt = txt.replace(C_PAT, C_FIX)
+                changed = True
+                log("  Strategy C OK: nuclear null-safe replacement applied")
+            else:
+                log("  Strategy C: !getCurrentUser().bot not found")
+
         if changed:
             open(path, "w", encoding="utf-8").write(txt)
-            log("  MessagesController.java written OK")
+            log("  FIX11 MessagesController.java written OK")
         else:
-            log("  No changes needed -- already fully patched")
+            log("  WARNING FIX11: NO changes made")
         return
+
+      return
 
 # --- 14. FIX: Patch MediaDataController.loadStickers() null-check ---
 def patch_media_data_controller_null_check():
