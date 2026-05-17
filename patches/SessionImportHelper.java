@@ -9,6 +9,7 @@ package org.telegram.ui;
 
     import org.json.JSONObject;
     import org.telegram.messenger.AndroidUtilities;
+    import org.telegram.messenger.ApplicationLoader;
     import org.telegram.messenger.UserConfig;
 
     import java.io.ByteArrayOutputStream;
@@ -30,7 +31,7 @@ package org.telegram.ui;
             AndroidUtilities.runOnUIThread(() -> cb.onError(msg));
         }
 
-        /** Entry point for normal URI-based import (from file picker) */
+        /** Entry point for URI-based import (file picker) */
         public static void importSession(Context ctx, Uri uri, SessionFormat format, ImportCallback cb) {
             new Thread(() -> {
                 try {
@@ -72,9 +73,7 @@ package org.telegram.ui;
 
         private static void importTelethon(Context ctx, Uri uri, ImportCallback cb) throws Exception {
             File tmp = copyToTemp(ctx, uri, "tl_session.db");
-            try {
-                importTelethonFile(ctx, tmp, cb);
-            } finally { tmp.delete(); }
+            try { importTelethonFile(ctx, tmp, cb); } finally { tmp.delete(); }
         }
 
         private static void importTelethonFile(Context ctx, File file, ImportCallback cb) throws Exception {
@@ -91,9 +90,7 @@ package org.telegram.ui;
 
         private static void importPyrogram(Context ctx, Uri uri, ImportCallback cb) throws Exception {
             File tmp = copyToTemp(ctx, uri, "pyro_session.db");
-            try {
-                importPyrogramFile(ctx, tmp, cb);
-            } finally { tmp.delete(); }
+            try { importPyrogramFile(ctx, tmp, cb); } finally { tmp.delete(); }
         }
 
         private static void importPyrogramFile(Context ctx, File file, ImportCallback cb) throws Exception {
@@ -142,9 +139,7 @@ package org.telegram.ui;
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             byte[] buf = new byte[8192];
             int len;
-            while ((len = is.read(buf)) != -1) {
-                baos.write(buf, 0, len);
-            }
+            while ((len = is.read(buf)) != -1) baos.write(buf, 0, len);
             return baos.toByteArray();
         }
 
@@ -155,8 +150,9 @@ package org.telegram.ui;
                 return;
             }
             try {
-                android.content.SharedPreferences prefs = ctx.getSharedPreferences(
-                    "userconfing" + (slot == 0 ? "" : slot), Context.MODE_PRIVATE);
+                String prefsName = "userconfing" + (slot == 0 ? "" : slot);
+                android.content.SharedPreferences prefs = ApplicationLoader.applicationContext
+                    .getSharedPreferences(prefsName, Context.MODE_PRIVATE);
                 android.content.SharedPreferences.Editor ed = prefs.edit();
                 ed.putString("dc" + dcId + "_auth_key", Base64.encodeToString(authKey, Base64.NO_WRAP));
                 ed.putInt("selectedDcId" + slot, dcId);
@@ -175,9 +171,21 @@ package org.telegram.ui;
             }
         }
 
+        /**
+         * Find first slot that is free: not activated by Nagram AND has no
+         * session-import activation flag in SharedPrefs.
+         */
         private static int findFreeSlot() {
             for (int i = 0; i < UserConfig.MAX_ACCOUNT_COUNT; i++) {
-                if (!UserConfig.getInstance(i).isClientActivated()) return i;
+                if (UserConfig.getInstance(i).isClientActivated()) continue;
+                // Also check our own SharedPrefs flag to avoid re-using a slot
+                // we already wrote to (e.g. after import but before restart)
+                String prefsName = "userconfing" + (i == 0 ? "" : i);
+                android.content.SharedPreferences prefs = ApplicationLoader.applicationContext
+                    .getSharedPreferences(prefsName, Context.MODE_PRIVATE);
+                if (!prefs.getBoolean("account_activated" + i, false)) {
+                    return i;
+                }
             }
             return -1;
         }
