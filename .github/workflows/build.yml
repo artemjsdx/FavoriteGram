@@ -47,7 +47,7 @@ name: Build FavoriteGram APK
         - name: Preserve cached native libs before submodule init
           run: |
             # Cache restores build/ into jni/ffmpeg/build etc., but the next step removes
-            # parent dirs without .git — so we back up cached libs to /tmp first.
+            # parent dirs without .git - so we back up cached libs to /tmp first.
             if [ "${{ steps.cache-ffmpeg.outputs.cache-hit }}" = "true" ]; then
               mkdir -p /tmp/native-cache
               cp -r nagram/TMessagesProj/jni/ffmpeg/build /tmp/native-cache/ffmpeg-build 2>/dev/null && echo "Backed up ffmpeg/build" || echo "ffmpeg/build not found (ok if first run)"
