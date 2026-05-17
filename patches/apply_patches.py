@@ -406,51 +406,47 @@ def patch_login_phone_view():
 
 # --- 13. FIX: Patch MessagesController.updateTimerProc() null-check ---
 def patch_messages_controller_timer():
-      log("=== Patching MessagesController.updateTimerProc() null-check ===")
-      import re
-      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-          if "MessagesController.java" not in files:
-              continue
-          path = os.path.join(dirpath, "MessagesController.java")
-          txt = open(path, encoding="utf-8", errors="ignore").read()
-          changed = False
+    log("=== Patching MessagesController.updateTimerProc() null-check ===")
+    import re
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "MessagesController.java" not in files:
+            continue
+        path = os.path.join(dirpath, "MessagesController.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        changed = False
+        GUARD = "        if (getUserConfig().getCurrentUser() == null) return; // FG_PATCH"
+        if "FG_PATCH" not in txt:
+            patched = re.sub(
+                r'(public void updateTimerProc\(\)\s*\{)',
+                lambda m: m.group(0) + "\n" + GUARD,
+                txt,
+                count=1
+            )
+            if patched != txt:
+                txt = patched
+                changed = True
+                log("  Strategy 1 OK: null-guard injected at updateTimerProc() start")
+            else:
+                log("  Strategy 1 FAILED: updateTimerProc() not found via regex")
+        else:
+            log("  Strategy 1: FG_PATCH already present")
+        PATTERN2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
+        FIXED2   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+        if PATTERN2 in txt:
+            txt = txt.replace(PATTERN2, FIXED2)
+            changed = True
+            log("  Strategy 2 OK: null-check added to isClientActivated condition")
+        else:
+            log("  Strategy 2: pattern already patched or not found")
+        if changed:
+            open(path, "w", encoding="utf-8").write(txt)
+            log("  MessagesController.java written OK")
+        else:
+            log("  No changes needed -- already fully patched")
+        return
 
-          # Strategy 1: inject null-guard at the very start of updateTimerProc()
-          GUARD = "        if (getUserConfig().getCurrentUser() == null) return; // FG_PATCH"
-          if "FG_PATCH" not in txt:
-              patched = re.sub(
-                  r'(public void updateTimerProc\(\)\s*\{)',
-                  lambda m: m.group(0) + "\n" + GUARD,
-                  txt,
-                  count=1
-              )
-              if patched != txt:
-                  txt = patched
-                  changed = True
-                  log("  Strategy 1 OK: null-guard injected at updateTimerProc() start")
-              else:
-                  log("  Strategy 1 FAILED: updateTimerProc() not found via regex")
-          else:
-              log("  Strategy 1: FG_PATCH already present")
-
-          # Strategy 2: fix the specific condition (belt AND suspenders)
-          PATTERN2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
-          FIXED2   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
-          if PATTERN2 in txt:
-              txt = txt.replace(PATTERN2, FIXED2)
-              changed = True
-              log("  Strategy 2 OK: null-check added to isClientActivated condition")
-          else:
-              log("  Strategy 2: pattern already patched or not found")
-
-          if changed:
-              open(path, "w", encoding="utf-8").write(txt)
-              log("  MessagesController.java written OK")
-          else:
-              log("  No changes needed — already fully patched")
-          return
-
-  def patch_media_data_controller_null_check():
+# --- 14. FIX: Patch MediaDataController.loadStickers() null-check ---
+def patch_media_data_controller_null_check():
     log("=== Patching MediaDataController.loadStickers() null-check ===")
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
         if "MediaDataController.java" not in files:
@@ -460,19 +456,16 @@ def patch_messages_controller_timer():
         if txt.count("getCurrentUser() != null && !getUserConfig().getCurrentUser().bot") >= 2:
             log("  already patched (found 2+ null-checks)")
             return
-        # Fix all occurrences: isClientActivated() && !getCurrentUser().bot -> add null check
-        patched = txt.replace(
-            "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot",
-            "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
-        )
-        count = txt.count("getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot")
+        PATTERN = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
+        FIXED   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+        count = txt.count(PATTERN)
+        patched = txt.replace(PATTERN, FIXED)
         if patched != txt:
             open(path, "w", encoding="utf-8").write(patched)
-            log(f"  patched MediaDataController.java: fixed {count} occurrence(s) with getCurrentUser() != null check")
+            log(f"  patched MediaDataController.java: fixed {count} occurrence(s)")
         else:
-            log("  WARNING: could not find loadStickers null-check pattern in MediaDataController.java!")
+            log("  WARNING: pattern not found in MediaDataController.java!")
         return
-
 
 # --- 15. FIX: Universal null-check scan — patch ANY file with getCurrentUser().bot without guard ---
 def patch_all_get_current_user_bot():
