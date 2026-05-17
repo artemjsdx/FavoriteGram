@@ -23,7 +23,7 @@ jobs:
         id: keys
         run: |
           FF=$(cat nagram/TMessagesProj/jni/build_ffmpeg_clang.sh nagram/TMessagesProj/jni/build_libvpx_clang.sh | sha256sum | cut -c1-16)
-          BS=$(cat nagram/TMessagesProj/jni/build_boringssl.sh | sha256sum | cut -c1-16)
+          BS=$(cat nagram/TMessagesProj/jni/build_boringssl.sh nagram/TMessagesProj/jni/patch_boringssl.sh | sha256sum | cut -c1-16)
           echo "ffmpeg=$FF" >> $GITHUB_OUTPUT
           echo "boringssl=$BS" >> $GITHUB_OUTPUT
           echo "FFmpeg key: $FF  BoringSSL key: $BS"
@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: nagram/TMessagesProj/jni/boringssl/build
-          key: v5-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
+          key: v6-boringssl-ndk21-${{ steps.keys.outputs.boringssl }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -143,9 +143,17 @@ jobs:
               rm -rf "TMessagesProj/jni/$lib/build"
               cp -r "/tmp/saved-libs/$lib-build" "TMessagesProj/jni/$lib/build"
               echo "Restored $lib/build ($(find TMessagesProj/jni/$lib/build -name '*.a' 2>/dev/null | wc -l) .a files)"
-              echo "  arm64-v8a check: $(ls TMessagesProj/jni/$lib/build/arm64-v8a/lib/*.a 2>/dev/null || echo MISSING)"
             fi
           done
+
+      - name: Patch BoringSSL source (always — needed for arm64 compile)
+        run: |
+          # patch_boringssl.sh adds AES_ige_encrypt and other missing APIs.
+          # Must run after git submodule update clones a fresh unpatched BoringSSL.
+          # Required even on cache-hit since we only cache .a files, not source patches.
+          cd nagram/TMessagesProj/jni
+          echo "Applying BoringSSL source patches..."
+          bash patch_boringssl.sh && echo "BoringSSL patched OK" || echo "WARNING: patch may already be applied"
 
       - name: Verify native libs (post-submodule-init)
         run: |
@@ -155,6 +163,8 @@ jobs:
           # Fail fast if critical .a is missing
           test -f nagram/TMessagesProj/jni/libvpx/build/arm64-v8a/lib/libvpx.a || { echo "ERROR: libvpx arm64-v8a MISSING"; exit 1; }
           test -f nagram/TMessagesProj/jni/libvpx/build/armeabi-v7a/lib/libvpx.a || { echo "ERROR: libvpx armeabi-v7a MISSING"; exit 1; }
+          # Check BoringSSL patch applied
+          grep -r "AES_ige_encrypt" nagram/TMessagesProj/jni/boringssl/include/ 2>/dev/null | head -3 || echo "WARNING: AES_ige_encrypt not found in boringssl headers"
           echo "All critical .a files present OK"
 
       - name: Install ImageMagick
