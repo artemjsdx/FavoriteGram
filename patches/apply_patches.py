@@ -39,7 +39,7 @@ def rename_branding():
 def remove_account_limit():
     log("=== Account limit -> 20 ===")
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-        if "UserConfig.java" != next(iter([f for f in files if f == "UserConfig.java"]), None):
+        if "UserConfig.java" not in files:
             continue
         path = os.path.join(dirpath, "UserConfig.java")
         txt = open(path, encoding="utf-8", errors="ignore").read()
@@ -170,22 +170,13 @@ def fix_google_services():
     except Exception as e:
         log("  could not read build.gradle: " + str(e))
     stub = {
-        "project_info": {
-            "project_number": "123456789012",
-            "project_id": "favoritegram-app",
-            "storage_bucket": "favoritegram-app.appspot.com"
-        },
-        "client": [{
-            "client_info": {
-                "mobilesdk_app_id": "1:123456789012:android:abcdef123456",
-                "android_client_info": {"package_name": pkg}
-            },
-            "api_key": [{"current_key": "AIzaSyFakeKeyForDebugBuildOnly00000000000"}],
-            "services": {
-                "appinvite_service": {"other_platform_oauth_client": []},
-                "analytics_service": {"analytics_property": {"tracking_id": ""}}
-            }
-        }],
+        "project_info": {"project_number": "123456789012", "project_id": "favoritegram-app",
+                         "storage_bucket": "favoritegram-app.appspot.com"},
+        "client": [{"client_info": {"mobilesdk_app_id": "1:123456789012:android:abcdef123456",
+                                    "android_client_info": {"package_name": pkg}},
+                    "api_key": [{"current_key": "AIzaSyFakeKeyForDebugBuildOnly00000000000"}],
+                    "services": {"appinvite_service": {"other_platform_oauth_client": []},
+                                 "analytics_service": {"analytics_property": {"tracking_id": ""}}}}],
         "configuration_version": "1"
     }
     open(gs_path, "w").write(json.dumps(stub, indent=2))
@@ -197,11 +188,7 @@ def remove_v7a():
     gradle_path = "TMessagesProj/build.gradle"
     txt = open(gradle_path, encoding="utf-8", errors="ignore").read()
     orig = txt
-    txt = re.sub(
-        r"include\s+'armeabi-v7a'\s*,\s*'arm64-v8a'",
-        "include 'arm64-v8a'",
-        txt
-    )
+    txt = re.sub(r"include\s+'armeabi-v7a'\s*,\s*'arm64-v8a'", "include 'arm64-v8a'", txt)
     txt = re.sub(r'\s*pickFirst\s+"lib/armeabi-v7a/[^"]*"\n?', '\n', txt)
     if txt != orig:
         open(gradle_path, "w", encoding="utf-8").write(txt)
@@ -240,18 +227,8 @@ def bypass_integrity_check():
     if "return JNI_OK;" in txt and "getApplication" not in txt:
         log("  already bypassed")
         return
-    stub = (
-        '#include "meth.h"\n'
-        '#include "openat.h"\n'
-        '#include "read_cert.h"\n'
-        '#include "SHA1.h"\n'
-        "\n"
-        'extern "C" {\n'
-        "int verifySign(JNIEnv *env) {\n"
-        "    return JNI_OK;\n"
-        "}\n"
-        "}\n"
-    )
+    stub = ('#include "meth.h"\n#include "openat.h"\n#include "read_cert.h"\n#include "SHA1.h"\n\n'
+            'extern "C" {\nint verifySign(JNIEnv *env) {\n    return JNI_OK;\n}\n}\n')
     open(path, "w", encoding="utf-8").write(stub)
     log("  replaced integrity.cpp with JNI_OK stub")
 
@@ -278,8 +255,7 @@ def patch_launch_activity():
         log("  injected handleResult into existing LaunchActivity.onActivityResult")
     else:
         override = (
-            "\n"
-            "    @Override\n"
+            "\n    @Override\n"
             "    public void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {\n"
             "        super.onActivityResult(requestCode, resultCode, data);\n"
             "        SessionFormatPickerBottomSheet.handleResult(this, requestCode, resultCode, data);\n"
@@ -302,39 +278,130 @@ def register_debug_receiver():
     if "DebugImportReceiver" in txt:
         log("  already registered")
         return
-    # Detect actual package name for receiver class
-    pkg_match = re.search(r'package="([^"]+)"', txt)
-    pkg = pkg_match.group(1) if pkg_match else "xyz.nextalone.nagram"
-    # Find actual Java package from IntroActivity
+    java_pkg = "org.telegram.ui"
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
         if "IntroActivity.java" in files:
             intro_txt = open(os.path.join(dirpath, "IntroActivity.java"), encoding="utf-8", errors="ignore").read()
             m = re.search(r"^package (.*?);", intro_txt, re.MULTILINE)
             if m:
                 java_pkg = m.group(1)
-                log("  java package: " + java_pkg)
             break
-    else:
-        java_pkg = "org.telegram.ui"
-
     receiver_xml = (
         '\n        <!-- FavoriteGram: Debug import receiver -->'
-        '\n        <receiver'
-        '\n            android:name="' + java_pkg + '.DebugImportReceiver"'
-        '\n            android:exported="true">'
+        '\n        <receiver android:name="' + java_pkg + '.DebugImportReceiver" android:exported="true">'
         '\n            <intent-filter>'
         '\n                <action android:name="xyz.nextalone.nagram.DEBUG_IMPORT" />'
         '\n            </intent-filter>'
         '\n        </receiver>'
     )
-
-    # Insert before </application>
     if "</application>" in txt:
         txt = txt.replace("</application>", receiver_xml + "\n    </application>")
         open(manifest, "w", encoding="utf-8").write(txt)
         log("  DebugImportReceiver registered in AndroidManifest.xml")
     else:
-        log("  ERROR: </application> tag not found in manifest!")
+        log("  ERROR: </application> tag not found!")
+
+# --- 12. FIX 1: Patch UserConfig.isClientActivated() to check our flag ---
+def patch_user_config_is_activated():
+    log("=== Patching UserConfig.isClientActivated() for session-import ===")
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "UserConfig.java" not in files:
+            continue
+        path = os.path.join(dirpath, "UserConfig.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        if "account_activated" in txt:
+            log("  already patched")
+            return
+        # Try pattern: public boolean isClientActivated() {
+        injection = (
+            '\n        // FavoriteGram: check session-import activated flag\n'
+            '        try {\n'
+            '            String _fgPName = "userconfing" + (currentAccount == 0 ? "" : currentAccount);\n'
+            '            android.content.SharedPreferences _fgP = ApplicationLoader.applicationContext\n'
+            '                .getSharedPreferences(_fgPName, android.content.Context.MODE_PRIVATE);\n'
+            '            if (_fgP.getBoolean("account_activated" + currentAccount, false)) return true;\n'
+            '        } catch (Exception _fgE) { /* ignore */ }\n'
+        )
+        patched = re.sub(
+            r'(public\s+boolean\s+isClientActivated\s*\(\s*\)\s*\{)',
+            r'\1' + injection,
+            txt, count=1
+        )
+        if patched == txt:
+            # Try with synchronized block
+            patched = re.sub(
+                r'(boolean\s+isClientActivated\s*\(\s*\)\s*\{\s*\n\s*)(synchronized)',
+                r'\1' + injection.lstrip('\n') + r'        \2',
+                txt, count=1
+            )
+        if patched != txt:
+            open(path, "w", encoding="utf-8").write(patched)
+            log("  patched UserConfig.isClientActivated()")
+        else:
+            log("  WARNING: could not find isClientActivated() pattern!")
+        return
+
+# --- 13. FIX 2: Patch LoginActivity phone view (Add Account screen) ---
+def patch_login_phone_view():
+    log("=== Patching LoginActivity phone view (Add Account button) ===")
+    login_path = None
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "LoginActivity.java" in files:
+            login_path = os.path.join(dirpath, "LoginActivity.java")
+            break
+    if not login_path:
+        log("  ERROR: LoginActivity.java not found!")
+        return
+    txt = open(login_path, encoding="utf-8", errors="ignore").read()
+    if "FavoriteGram: Session Import" in txt:
+        log("  already patched")
+        return
+
+    session_btn_code = (
+        '\n                // FavoriteGram: Session Import Button\n'
+        '                try {\n'
+        '                    android.widget.TextView _fgSessBtn = new android.widget.TextView(context);\n'
+        '                    _fgSessBtn.setText("\\u0412\\u043e\\u0439\\u0442\\u0438 \\u0447\\u0435\\u0440\\u0435\\u0437 \\u0444\\u0430\\u0439\\u043b \\u0441\\u0435\\u0441\\u0441\\u0438\\u0438");\n'
+        '                    _fgSessBtn.setGravity(android.view.Gravity.CENTER);\n'
+        '                    _fgSessBtn.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 15);\n'
+        '                    _fgSessBtn.setPadding(AndroidUtilities.dp(16), AndroidUtilities.dp(12), AndroidUtilities.dp(16), AndroidUtilities.dp(12));\n'
+        '                    _fgSessBtn.setTextColor(0xFF2196F3);\n'
+        '                    _fgSessBtn.setOnClickListener(_fgV -> {\n'
+        '                        android.app.Activity _fgAct = (context instanceof android.app.Activity) ?\n'
+        '                            (android.app.Activity) context : null;\n'
+        '                        if (_fgAct != null) new SessionFormatPickerBottomSheet(_fgAct, _fgSessBtn).show();\n'
+        '                    });\n'
+        '                    linearLayout.addView(_fgSessBtn,\n'
+        '                        LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT,\n'
+        '                            0, 8, 0, 8));\n'
+        '                } catch (Exception _fgEx4) {\n'
+        '                    android.util.Log.e("FavoriteGram", "session btn login failed", _fgEx4);\n'
+        '                }\n'
+    )
+
+    # Try multiple injection points — one of these will exist in LoginActivityPhoneView
+    patterns = [
+        r'(linearLayout\.addView\(syncContactsCheckBox[^;]*;)',
+        r'(linearLayout\.addView\(syncContacts[^;]*;)',
+        r'(linearLayout\.addView\(checkBox[^;]*;)',
+        r'(linearLayout\.addView\(syncContactsBox[^;]*;)',
+        # Fallback: after addView for the phone number field
+        r'(linearLayout\.addView\(phoneField[^;]*;)',
+        r'(linearLayout\.addView\(editText[^;]*;)',
+    ]
+    patched = txt
+    for p in patterns:
+        result = re.sub(p, lambda m: m.group(0) + session_btn_code, patched, count=1)
+        if result != patched:
+            patched = result
+            log("  injected session button in phone view (pattern: " + p[:60] + ")")
+            break
+    else:
+        log("  WARNING: could not find any injection point in LoginActivity phone view")
+
+    if patched != txt:
+        open(login_path, "w", encoding="utf-8").write(patched)
+        log("  LoginActivity patched")
 
 # --- MAIN ---
 if __name__ == "__main__":
@@ -348,6 +415,8 @@ if __name__ == "__main__":
     patch_intro_activity()
     patch_launch_activity()
     register_debug_receiver()
+    patch_user_config_is_activated()   # FIX 1: isClientActivated check
+    patch_login_phone_view()           # FIX 2: button in Add Account
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
