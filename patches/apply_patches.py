@@ -404,9 +404,9 @@ def patch_login_phone_view():
         log("  LoginActivity patched")
 
 
-# --- 13. FIX: Patch MessagesController.updateTimerProc() null-check ---
+# --- 13. FIX11: Patch MessagesController.updateTimerProc() null-check (BULLETPROOF) ---
 def patch_messages_controller_timer():
-    log("=== Patching MessagesController.updateTimerProc() null-check ===")
+    log("=== FIX11: Patching MessagesController.updateTimerProc() null-check ===")
     import re
     for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
         if "MessagesController.java" not in files:
@@ -414,35 +414,70 @@ def patch_messages_controller_timer():
         path = os.path.join(dirpath, "MessagesController.java")
         txt = open(path, encoding="utf-8", errors="ignore").read()
         changed = False
-        GUARD = "        if (getUserConfig().getCurrentUser() == null) return; // FG_PATCH"
-        if "FG_PATCH" not in txt:
-            patched = re.sub(
-                r'(public void updateTimerProc\(\)\s*\{)',
-                lambda m: m.group(0) + "\n" + GUARD,
-                txt,
-                count=1
-            )
+
+        # Strategy A: local-variable replacement (race-condition-safe)
+        SA_RE = re.compile(
+            r'([ \t]*)(if\s*\(\s*getUserConfig\(\)\.isClientActivated\(\)\s*&&\s*!getUserConfig\(\)\.getCurrentUser\(\)\.bot\s*\)\s*\{)',
+            re.DOTALL
+        )
+        if "FG11_LOCAL" not in txt:
+            def sa_replace(m):
+                indent = m.group(1)
+                return (
+                    indent + "final org.telegram.tgnet.TLRPC.User _fgU11 = getUserConfig().getCurrentUser(); // FG11_LOCAL\n"
+                    + indent + "if (getUserConfig().isClientActivated() && _fgU11 != null && !_fgU11.bot) {"
+                )
+            patched = SA_RE.sub(sa_replace, txt, count=1)
             if patched != txt:
                 txt = patched
                 changed = True
-                log("  Strategy 1 OK: null-guard injected at updateTimerProc() start")
+                log("  Strategy A OK: local-var race-safe replacement applied")
             else:
-                log("  Strategy 1 FAILED: updateTimerProc() not found via regex")
+                log("  Strategy A: regex miss, trying A2 plain-string fallback")
+                PAT_A2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
+                FIX_A2 = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
+                if PAT_A2 in txt:
+                    txt = txt.replace(PAT_A2, FIX_A2)
+                    changed = True
+                    log("  Strategy A2 OK: inline null-check applied")
+                else:
+                    log("  Strategy A2 FAILED: isClientActivated pattern not found")
         else:
-            log("  Strategy 1: FG_PATCH already present")
-        PATTERN2 = "getUserConfig().isClientActivated() && !getUserConfig().getCurrentUser().bot"
-        FIXED2   = "getUserConfig().isClientActivated() && getUserConfig().getCurrentUser() != null && !getUserConfig().getCurrentUser().bot"
-        if PATTERN2 in txt:
-            txt = txt.replace(PATTERN2, FIXED2)
-            changed = True
-            log("  Strategy 2 OK: null-check added to isClientActivated condition")
+            log("  Strategy A: FG11_LOCAL already present")
+
+        # Strategy B: guard at start of updateTimerProc() — flexible regex
+        if "FG11_GUARD" not in txt:
+            SB_RE = re.compile(
+                r'((?:@\w+\s+)*(?:public|protected|private)?\s*void\s+updateTimerProc\s*\(\s*\))\s*(\{)',
+                re.MULTILINE | re.DOTALL
+            )
+            GUARD = "\n        if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
+            patched = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + GUARD, txt, count=1)
+            if patched != txt:
+                txt = patched
+                changed = True
+                log("  Strategy B OK: early-return guard at updateTimerProc() start")
+            else:
+                log("  Strategy B FAILED: updateTimerProc signature not matched")
         else:
-            log("  Strategy 2: pattern already patched or not found")
+            log("  Strategy B: FG11_GUARD already present")
+
+        # Strategy C: nuclear — any !getCurrentUser().bot without null-check
+        if "FG11_LOCAL" not in txt and "FG11_GUARD" not in txt:
+            C_PAT = "!getUserConfig().getCurrentUser().bot"
+            C_FIX = "(getUserConfig().getCurrentUser() == null || !getUserConfig().getCurrentUser().bot)"
+            if C_PAT in txt:
+                txt = txt.replace(C_PAT, C_FIX)
+                changed = True
+                log("  Strategy C OK: nuclear null-safe replacement applied")
+            else:
+                log("  Strategy C: !getCurrentUser().bot not found")
+
         if changed:
             open(path, "w", encoding="utf-8").write(txt)
-            log("  MessagesController.java written OK")
+            log("  FIX11 MessagesController.java written OK")
         else:
-            log("  No changes needed -- already fully patched")
+            log("  WARNING FIX11: NO changes made")
         return
 
 # --- 14. FIX: Patch MediaDataController.loadStickers() null-check ---
@@ -633,18 +668,110 @@ def patch_profile_activity_current_chat_null_check():
             continue
         path = os.path.join(dirpath, "ProfileActivity.java")
         txt = open(path, encoding="utf-8", errors="ignore").read()
-        if "FG_FIX9" in txt:
-            log("  already patched")
-            return
+        # FIX9: replace ALL bare `if (currentChat.megagroup) {` with null-guarded version.
+        # The original patch only replaced the first occurrence (line 2245), but the
+        # crash actually fires from line 5986 which has the same pattern. The null-guarded
+        # form is safe even when currentChat is already known to be non-null.
         old = "            if (currentChat.megagroup) {"
         new = "            if (currentChat != null && currentChat.megagroup) { // FG_FIX9"
-        if old in txt:
-            open(path, "w", encoding="utf-8").write(txt.replace(old, new, 1))
-            log("  patched ProfileActivity.java: currentChat null-check before .megagroup")
-        else:
-            log("  WARNING: FIX9 pattern not found!")
+        # Idempotency: only replace lines that still match the bare form (so re-running won't double-patch).
+        bare_count = txt.count(old)
+        if bare_count == 0:
+            log("  no bare matches left (already patched)")
+            return
+        new_txt = txt.replace(old, new)
+        open(path, "w", encoding="utf-8").write(new_txt)
+        log(f"  patched ProfileActivity.java: currentChat null-check before .megagroup ({bare_count} occurrence(s))")
         return
 
+
+  # --- 20. FIX12: MessagesController — fetch current user when null after session import ---
+  def patch_messages_controller_fetch_user():
+      log("=== FIX12: MessagesController — auto-fetch user when null after session import ===")
+      import re as _re
+      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+          if "MessagesController.java" not in files:
+              continue
+          path = os.path.join(dirpath, "MessagesController.java")
+          txt = open(path, encoding="utf-8", errors="ignore").read()
+          if "FG12_START" in txt:
+              log("  already patched (FG12_START found)")
+              return
+
+          # Java block to inject
+          FG12_BLOCK = (
+              "if (getUserConfig().getCurrentUser() == null) { // FG12_START\n"
+              "            if (getUserConfig().isClientActivated()) {\n"
+              "                try {\n"
+              "                    org.telegram.tgnet.TLRPC.TL_users_getUsers _fgReq12 =\n"
+              "                            new org.telegram.tgnet.TLRPC.TL_users_getUsers();\n"
+              "                    _fgReq12.id = new java.util.ArrayList<>();\n"
+              "                    _fgReq12.id.add(new org.telegram.tgnet.TLRPC.TL_inputUserSelf());\n"
+              "                    getConnectionsManager().sendRequest(_fgReq12, (_fgR12, _fgE12) -> {\n"
+              "                        try {\n"
+              "                            if (_fgR12 instanceof org.telegram.tgnet.TLRPC.Users) {\n"
+              "                                java.util.ArrayList<org.telegram.tgnet.TLRPC.User> _fgUL =\n"
+              "                                        ((org.telegram.tgnet.TLRPC.Users) _fgR12).users;\n"
+              "                                if (_fgUL != null && !_fgUL.isEmpty()) {\n"
+              "                                    org.telegram.tgnet.TLRPC.User _fgMe = _fgUL.get(0);\n"
+              "                                    if (_fgMe != null && !_fgMe.deleted) {\n"
+              "                                        getUserConfig().setCurrentUser(_fgMe);\n"
+              "                                        getUserConfig().saveConfig(true);\n"
+              "                                        org.telegram.messenger.AndroidUtilities.runOnUIThread(\n"
+              "                                            () -> getNotificationCenter().postNotificationName(\n"
+              "                                                org.telegram.messenger.NotificationCenter.mainUserInfoChanged));\n"
+              "                                    }\n"
+              "                                }\n"
+              "                            }\n"
+              "                        } catch (Exception _fg12inner) { /* ignore */ }\n"
+              "                    });\n"
+              "                } catch (Exception _fg12e) { /* ignore */ }\n"
+              "            }\n"
+              "            return; // FG12_END\n"
+              "        }"
+          )
+
+          changed = False
+
+          # Strategy A: replace existing FG11_GUARD with FG12 block
+          OLD_GUARD = "if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
+          if OLD_GUARD in txt:
+              idx = txt.find(OLD_GUARD)
+              line_start = txt.rfind("\n", 0, idx) + 1
+              indent = ""
+              for ch in txt[line_start:idx]:
+                  if ch in (" ", "\t"):
+                      indent += ch
+                  else:
+                      break
+              new_block = indent + FG12_BLOCK.replace("\n", "\n" + indent)
+              patched = txt.replace(indent + OLD_GUARD, new_block, 1)
+              if patched != txt:
+                  txt = patched
+                  changed = True
+                  log("  FG12-A: replaced FG11_GUARD with user-fetch block")
+
+          # Strategy B: inject at start of updateTimerProc (if no FG11_GUARD found)
+          if not changed:
+              SB_RE = _re.compile(
+                  r'((?:@\w+\s+)*(?:public|protected|private)?\s*void\s+updateTimerProc\s*\(\s*\))\s*(\{)',
+                  _re.MULTILINE | _re.DOTALL
+              )
+              inject = "\n        " + FG12_BLOCK.replace("\n", "\n        ")
+              patched2 = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + inject, txt, count=1)
+              if patched2 != txt:
+                  txt = patched2
+                  changed = True
+                  log("  FG12-B: injected at start of updateTimerProc (fallback)")
+              else:
+                  log("  WARNING: could not inject FG12 into MessagesController.java!")
+
+          if changed:
+              open(path, "w", encoding="utf-8").write(txt)
+              log("  MessagesController.java FG12 applied")
+          return
+
+  
   # --- MAIN ---
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -666,6 +793,7 @@ if __name__ == "__main__":
     patch_profile_activity_preloader_null_check()  # FIX 7: ProfileActivity preloader NPE
     patch_shared_media_layout_fill_media_data()       # FIX 8: SharedMediaLayout fillMediaData NPE
     patch_profile_activity_current_chat_null_check()   # FIX 9: ProfileActivity currentChat NPE
+    patch_messages_controller_fetch_user()            # FIX12: auto-fetch user after session import
     fix_google_services()
     remove_v7a()
     log("=== All patches applied ===")
