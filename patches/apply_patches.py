@@ -685,96 +685,96 @@ def patch_profile_activity_current_chat_null_check():
         return
 
 
-  # --- 20. FIX12: MessagesController — fetch current user when null after session import ---
-  def patch_messages_controller_fetch_user():
-      log("=== FIX12: MessagesController — auto-fetch user when null after session import ===")
-      import re as _re
-      for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
-          if "MessagesController.java" not in files:
-              continue
-          path = os.path.join(dirpath, "MessagesController.java")
-          txt = open(path, encoding="utf-8", errors="ignore").read()
-          if "FG12_START" in txt:
-              log("  already patched (FG12_START found)")
-              return
+# --- 20. FIX12: MessagesController — fetch current user when null after session import ---
+def patch_messages_controller_fetch_user():
+    log("=== FIX12: MessagesController — auto-fetch user when null after session import ===")
+    import re as _re
+    for dirpath, dirs, files in os.walk("TMessagesProj/src/main/java"):
+        if "MessagesController.java" not in files:
+            continue
+        path = os.path.join(dirpath, "MessagesController.java")
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+        if "FG12_START" in txt:
+            log("  already patched (FG12_START found)")
+            return
 
-          FG12_BLOCK = (
-              "if (getUserConfig().getCurrentUser() == null) { // FG12_START\n"
-              "            if (getUserConfig().isClientActivated()) {\n"
-              "                try {\n"
-              "                    org.telegram.tgnet.TLRPC.TL_users_getUsers _fgReq12 =\n"
-              "                            new org.telegram.tgnet.TLRPC.TL_users_getUsers();\n"
-              "                    _fgReq12.id = new java.util.ArrayList<>();\n"
-              "                    _fgReq12.id.add(new org.telegram.tgnet.TLRPC.TL_inputUserSelf());\n"
-              "                    getConnectionsManager().sendRequest(_fgReq12, (_fgR12, _fgE12) -> {\n"
-              "                        try {\n"
-              "                            java.util.ArrayList<?> _fgUL = null;\n"
-              "                            if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_users) {\n"
-              "                                _fgUL = ((org.telegram.tgnet.TLRPC.TL_users_users) _fgR12).users;\n"
-              "                            } else if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_usersSlice) {\n"
-              "                                _fgUL = ((org.telegram.tgnet.TLRPC.TL_users_usersSlice) _fgR12).users;\n"
-              "                            }\n"
-              "                            if (_fgUL != null && !_fgUL.isEmpty()\n"
-              "                                    && _fgUL.get(0) instanceof org.telegram.tgnet.TLRPC.TL_user) {\n"
-              "                                org.telegram.tgnet.TLRPC.TL_user _fgMe =\n"
-              "                                        (org.telegram.tgnet.TLRPC.TL_user) _fgUL.get(0);\n"
-              "                                if (!_fgMe.deleted) {\n"
-              "                                    getUserConfig().setCurrentUser(_fgMe);\n"
-              "                                    getUserConfig().saveConfig(true);\n"
-              "                                    org.telegram.messenger.AndroidUtilities.runOnUIThread(\n"
-              "                                        () -> getNotificationCenter().postNotificationName(\n"
-              "                                            org.telegram.messenger.NotificationCenter.currentUserChanged));\n"
-              "                                }\n"
-              "                            }\n"
-              "                        } catch (Exception _fg12inner) { /* ignore */ }\n"
-              "                    });\n"
-              "                } catch (Exception _fg12e) { /* ignore */ }\n"
-              "            }\n"
-              "            return; // FG12_END\n"
-              "        }"
-          )
+        FG12_BLOCK = (
+            "if (getUserConfig().getCurrentUser() == null) { // FG12_START\n"
+            "            if (getUserConfig().isClientActivated()) {\n"
+            "                try {\n"
+            "                    org.telegram.tgnet.TLRPC.TL_users_getUsers _fgReq12 =\n"
+            "                            new org.telegram.tgnet.TLRPC.TL_users_getUsers();\n"
+            "                    _fgReq12.id = new java.util.ArrayList<>();\n"
+            "                    _fgReq12.id.add(new org.telegram.tgnet.TLRPC.TL_inputUserSelf());\n"
+            "                    getConnectionsManager().sendRequest(_fgReq12, (_fgR12, _fgE12) -> {\n"
+            "                        try {\n"
+            "                            java.util.ArrayList<?> _fgUL = null;\n"
+            "                            if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_users) {\n"
+            "                                _fgUL = ((org.telegram.tgnet.TLRPC.TL_users_users) _fgR12).users;\n"
+            "                            } else if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_usersSlice) {\n"
+            "                                _fgUL = ((org.telegram.tgnet.TLRPC.TL_users_usersSlice) _fgR12).users;\n"
+            "                            }\n"
+            "                            if (_fgUL != null && !_fgUL.isEmpty()\n"
+            "                                    && _fgUL.get(0) instanceof org.telegram.tgnet.TLRPC.TL_user) {\n"
+            "                                org.telegram.tgnet.TLRPC.TL_user _fgMe =\n"
+            "                                        (org.telegram.tgnet.TLRPC.TL_user) _fgUL.get(0);\n"
+            "                                if (!_fgMe.deleted) {\n"
+            "                                    getUserConfig().setCurrentUser(_fgMe);\n"
+            "                                    getUserConfig().saveConfig(true);\n"
+            "                                    org.telegram.messenger.AndroidUtilities.runOnUIThread(\n"
+            "                                        () -> getNotificationCenter().postNotificationName(\n"
+            "                                            org.telegram.messenger.NotificationCenter.currentUserChanged));\n"
+            "                                }\n"
+            "                            }\n"
+            "                        } catch (Exception _fg12inner) { /* ignore */ }\n"
+            "                    });\n"
+            "                } catch (Exception _fg12e) { /* ignore */ }\n"
+            "            }\n"
+            "            return; // FG12_END\n"
+            "        }"
+        )
 
-          changed = False
+        changed = False
 
-          # Strategy A: replace existing FG11_GUARD with FG12 block
-          OLD_GUARD = "if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
-          if OLD_GUARD in txt:
-              # Find indentation
-              idx = txt.find(OLD_GUARD)
-              line_start = txt.rfind("\n", 0, idx) + 1
-              indent = ""
-              for ch in txt[line_start:idx]:
-                  if ch in (" ", "\t"):
-                      indent += ch
-                  else:
-                      break
-              new_block = indent + FG12_BLOCK.replace("\n", "\n" + indent)
-              # Remove trailing indent from last line
-              patched = txt.replace(indent + OLD_GUARD, new_block, 1)
-              if patched != txt:
-                  txt = patched
-                  changed = True
-                  log("  FG12-A: replaced FG11_GUARD with user-fetch block")
+        # Strategy A: replace existing FG11_GUARD with FG12 block
+        OLD_GUARD = "if (getUserConfig().getCurrentUser() == null) return; // FG11_GUARD"
+        if OLD_GUARD in txt:
+            # Find indentation
+            idx = txt.find(OLD_GUARD)
+            line_start = txt.rfind("\n", 0, idx) + 1
+            indent = ""
+            for ch in txt[line_start:idx]:
+                if ch in (" ", "\t"):
+                    indent += ch
+                else:
+                    break
+            new_block = indent + FG12_BLOCK.replace("\n", "\n" + indent)
+            # Remove trailing indent from last line
+            patched = txt.replace(indent + OLD_GUARD, new_block, 1)
+            if patched != txt:
+                txt = patched
+                changed = True
+                log("  FG12-A: replaced FG11_GUARD with user-fetch block")
 
-          # Strategy B: inject at start of updateTimerProc (if no FG11_GUARD found)
-          if not changed:
-              SB_RE = _re.compile(
-                  r'((?:@\w+\s+)*(?:public|protected|private)?\s*void\s+updateTimerProc\s*\(\s*\))\s*(\{)',
-                  _re.MULTILINE | _re.DOTALL
-              )
-              inject = "\n        " + FG12_BLOCK.replace("\n", "\n        ")
-              patched2 = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + inject, txt, count=1)
-              if patched2 != txt:
-                  txt = patched2
-                  changed = True
-                  log("  FG12-B: injected at start of updateTimerProc (fallback)")
-              else:
-                  log("  WARNING: could not inject FG12 into MessagesController.java!")
+        # Strategy B: inject at start of updateTimerProc (if no FG11_GUARD found)
+        if not changed:
+            SB_RE = _re.compile(
+                r'((?:@\w+\s+)*(?:public|protected|private)?\s*void\s+updateTimerProc\s*\(\s*\))\s*(\{)',
+                _re.MULTILINE | _re.DOTALL
+            )
+            inject = "\n        " + FG12_BLOCK.replace("\n", "\n        ")
+            patched2 = SB_RE.sub(lambda m: m.group(1) + " " + m.group(2) + inject, txt, count=1)
+            if patched2 != txt:
+                txt = patched2
+                changed = True
+                log("  FG12-B: injected at start of updateTimerProc (fallback)")
+            else:
+                log("  WARNING: could not inject FG12 into MessagesController.java!")
 
-          if changed:
-              open(path, "w", encoding="utf-8").write(txt)
-              log("  MessagesController.java FG12 applied")
-          return
+        if changed:
+            open(path, "w", encoding="utf-8").write(txt)
+            log("  MessagesController.java FG12 applied")
+        return
 
   
   # --- MAIN ---
