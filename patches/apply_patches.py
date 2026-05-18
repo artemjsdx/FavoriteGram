@@ -708,7 +708,7 @@ def patch_messages_controller_fetch_user():
             "                    _fgReq12.id.add(new org.telegram.tgnet.TLRPC.TL_inputUserSelf());\n"
             "                    getConnectionsManager().sendRequest(_fgReq12, (_fgR12, _fgE12) -> {\n"
             "                        try {\n"
-            "                            java.util.ArrayList<?> _fgUL = null;\n"
+            
             "                            if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_users) {\n"
             "                                _fgUL = ((org.telegram.tgnet.TLRPC.TL_users_users) _fgR12).users;\n"
             "                            } else if (_fgR12 instanceof org.telegram.tgnet.TLRPC.TL_users_usersSlice) {\n"
