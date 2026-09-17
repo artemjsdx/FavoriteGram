@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "start": "node server/index.mjs",
+    "start:wispbyte": "node server/index.mjs",
     "lint": "eslint . --ignore-pattern .next --ignore-pattern out"
   },
   "dependencies": {
