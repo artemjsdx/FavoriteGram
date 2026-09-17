@@ -9,7 +9,7 @@ import {
   useState,
 } from "react"
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion"
-import { MeshGradient, Waves } from "@paper-design/shaders-react"
+import { MeshGradient } from "@paper-design/shaders-react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -177,6 +177,14 @@ const CHATS_KEY = "favourite-gram.chats"
 const THEME_KEY = "favourite-gram.theme"
 const BACKEND_KEY = "favourite-gram.backend"
 
+type ServerUser = { username: string; name: string; bio: string; avatarUrl: string; online?: boolean }
+type ServerMessage = { id: string; sender: ServerUser; kind: MessageKind; body?: string; duration?: number; mediaUrl?: string; fileName?: string; fileSize?: number; fileType?: string; createdAt: number }
+type ServerChat = { id: string; person: ServerUser; messages: ServerMessage[]; unread: number; updatedAt: number }
+
+function storageKey(base: string, username: string) {
+  return `${base}:${username.replace(/^@/, "").toLowerCase() || "guest"}`
+}
+
 type BackendResult<T> = { available: boolean; ok: boolean; status: number; data?: T }
 
 async function backendRequest<T>(path: string, init?: RequestInit): Promise<BackendResult<T>> {
@@ -203,6 +211,33 @@ function fileToDataUrl(file: Blob) {
   })
 }
 
+function mapServerChat(chat: ServerChat, myUsername: string): Chat {
+  return {
+    id: `server-${chat.id}`,
+    serverId: chat.id,
+    name: chat.person.name,
+    username: chat.person.username,
+    initials: getInitials(chat.person.name),
+    imageUrl: chat.person.avatarUrl,
+    hue: "from-stone-400 to-stone-800",
+    online: Boolean(chat.person.online),
+    bio: chat.person.bio || "Описание пока не добавлено.",
+    unread: chat.unread || 0,
+    messages: chat.messages.map((message) => ({
+      id: message.id,
+      sender: message.sender.username === myUsername ? "me" as const : "them" as const,
+      kind: message.kind,
+      body: message.body,
+      duration: message.duration,
+      mediaUrl: message.mediaUrl,
+      fileName: message.fileName,
+      fileSize: message.fileSize,
+      fileType: message.fileType,
+      time: new Date(message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }),
+    })),
+  }
+}
+
 export function FavouriteGram() {
   const [screen, setScreen] = useState<Screen>("landing")
   const [authMode, setAuthMode] = useState<"signup" | "login">("signup")
@@ -210,11 +245,23 @@ export function FavouriteGram() {
   const reducedMotion = useReducedMotion()
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const savedSession = window.localStorage.getItem(SESSION_KEY)
-      if (savedSession) setSessionUsername(savedSession)
-    }, 0)
-    return () => window.clearTimeout(timer)
+    let cancelled = false
+    void (async () => {
+      const savedSession = window.localStorage.getItem(SESSION_KEY) || ""
+      if (savedSession && !cancelled) setSessionUsername(savedSession)
+      const me = await backendRequest<{ user?: ServerUser }>("/api/me")
+      if (cancelled || !me.available) return
+      if (me.ok && me.data?.user) {
+        window.localStorage.setItem(BACKEND_KEY, "1")
+        window.localStorage.setItem(SESSION_KEY, me.data.user.username)
+        setSessionUsername(me.data.user.username)
+      } else if (me.status === 401 && window.localStorage.getItem(BACKEND_KEY) === "1") {
+        window.localStorage.removeItem(BACKEND_KEY)
+        window.localStorage.removeItem(SESSION_KEY)
+        setSessionUsername("")
+      }
+    })()
+    return () => { cancelled = true }
   }, [])
 
   const openAuth = (mode: "signup" | "login") => {
@@ -281,7 +328,7 @@ function Landing({ onOpenAuth, onOpenMessenger, sessionUsername, reducedMotion }
       className="relative min-h-svh overflow-hidden bg-[#050506]"
     >
       <div className="landing-shader absolute inset-0 opacity-95" aria-hidden="true">
-        <Waves className="h-full w-full" colorFront="#cfc2aa" colorBack="#17130f" shape={2.2} frequency={0.22} amplitude={0.92} spacing={1.12} proportion={0.68} softness={0.72} scale={1.45} rotation={8} maxPixelCount={720000} minPixelRatio={0.56} />
+        <MeshGradient className="h-full w-full" colors={["#050505", "#1a1713", "#655b4d", "#d6c5a9"]} distortion={0.82} swirl={0.46} speed={reducedMotion ? 0 : 0.28} maxPixelCount={720000} minPixelRatio={0.56} />
       </div>
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_34%,transparent_0,rgba(5,5,6,.12)_44%,rgba(5,5,6,.9)_100%)]" />
       <div className="noise-layer absolute inset-0 opacity-[0.11]" aria-hidden="true" />
@@ -363,6 +410,8 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
   const [status, setStatus] = useState<"idle" | "checking" | "success" | "error">("idle")
   const [error, setError] = useState("")
   const [showRecovery, setShowRecovery] = useState(false)
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([])
+  const [resetOpen, setResetOpen] = useState(false)
 
   const strength = useMemo(() => {
     let score = 0
@@ -379,10 +428,11 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
     if (!/^[a-z0-9_]{3,32}$/i.test(username)) { setError("Юзернейм: 3–32 символа, латиница, цифры и подчёркивание."); setStatus("error"); return }
     if (password.length < 5) { setError("Используйте не меньше 5 символов."); setStatus("error"); return }
     setStatus("checking")
-    const backend = await backendRequest<{ user?: { username: string }; error?: string }>(`/api/auth/${mode === "signup" ? "register" : "login"}`, { method: "POST", body: JSON.stringify({ username, password }) })
+    const backend = await backendRequest<{ user?: ServerUser; recoveryCodes?: string[]; error?: string }>(`/api/auth/${mode === "signup" ? "register" : "login"}`, { method: "POST", body: JSON.stringify({ username, password }) })
     if (backend.available) {
       if (!backend.ok) { setError(backend.data?.error || "Не удалось войти."); setStatus("error"); return }
       window.localStorage.setItem(BACKEND_KEY, "1")
+      if (backend.data?.recoveryCodes) setRecoveryCodes(backend.data.recoveryCodes)
       setStatus("success")
       window.setTimeout(() => { if (mode === "signup") setShowRecovery(true); else onComplete(username) }, reducedMotion ? 80 : 420)
       return
@@ -425,6 +475,7 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
                     <Button disabled={status === "checking" || status === "success"} className="mt-3 h-12 w-full rounded-[14px] bg-white text-base text-black hover:bg-white/88">
                       {status === "checking" ? "Проверяем…" : status === "success" ? "Готово" : tab === "signup" ? "Создать аккаунт" : "Войти"}{status === "success" ? <Check className="ml-2 size-4" /> : <ArrowRight className="ml-2 size-4" />}
                     </Button>
+                    {tab === "login" && <button type="button" onClick={() => setResetOpen(true)} className="mt-4 w-full text-center text-sm text-white/42 transition hover:text-white/72">Восстановить доступ по коду</button>}
                   </form>
                 </TabsContent>
               ))}
@@ -432,7 +483,8 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
           </div>
         </div>
       </div>
-      <RecoveryDialog open={showRecovery} onContinue={() => { setShowRecovery(false); onComplete(username) }} />
+      <RecoveryDialog open={showRecovery} codes={recoveryCodes} onContinue={() => { setShowRecovery(false); onComplete(username) }} />
+      <ResetPasswordDialog open={resetOpen} onOpenChange={setResetOpen} initialUsername={username} onComplete={(restoredUsername) => { setResetOpen(false); onComplete(restoredUsername) }} />
     </motion.main>
   )
 }
@@ -464,17 +516,37 @@ function PasswordDeck({ strength, status, reducedMotion }: { strength: number; s
   )
 }
 
-function RecoveryDialog({ open, onContinue }: { open: boolean; onContinue: () => void }) {
-  const codes = ["EMBER-7K4Q", "LUMEN-9T2M", "NORTH-6D8P", "FIELD-3X7R", "ORBIT-5C2V", "STILL-8N4W"]
+function RecoveryDialog({ open, codes, onContinue }: { open: boolean; codes: string[]; onContinue: () => void }) {
+  const shownCodes = codes.length ? codes : ["LOCAL-7K4Q", "LOCAL-9T2M", "LOCAL-6D8P", "LOCAL-3X7R", "LOCAL-5C2V", "LOCAL-8N4W"]
   return (
     <Dialog open={open} onOpenChange={() => undefined}>
       <DialogContent showCloseButton={false} className="max-w-[520px] rounded-[24px] border-white/10 bg-[#0d0d0f] p-7 text-white shadow-2xl">
         <DialogHeader><div className="mb-3 grid size-11 place-items-center rounded-[14px] border border-white/10 bg-white/5"><ShieldCheck className="size-5" /></div><DialogTitle className="text-2xl tracking-[-0.035em]">Сохраните коды восстановления</DialogTitle><DialogDescription className="leading-6 text-white/45">Без почты и номера телефона это единственный способ вернуть доступ, если вы потеряете пароль и активные устройства.</DialogDescription></DialogHeader>
-        <div className="grid grid-cols-2 gap-2 rounded-[18px] border border-white/8 bg-black/35 p-4 font-mono text-sm text-white/72">{codes.map((code) => <span key={code} className="rounded-lg bg-white/[0.035] px-3 py-2">{code}</span>)}</div>
-        <DialogFooter><Button variant="outline" className="border-white/10 bg-white/4 text-white hover:bg-white/8 hover:text-white" onClick={() => { navigator.clipboard?.writeText(codes.join("\n")); toast.success("Коды скопированы") }}>Скопировать</Button><Button className="bg-white text-black hover:bg-white/88" onClick={onContinue}>Я сохранил коды</Button></DialogFooter>
+        <div className="grid grid-cols-2 gap-2 rounded-[18px] border border-white/8 bg-black/35 p-4 font-mono text-sm text-white/72">{shownCodes.map((code) => <span key={code} className="rounded-lg bg-white/[0.035] px-3 py-2">{code}</span>)}</div>
+        <DialogFooter><Button variant="outline" className="border-white/10 bg-white/4 text-white hover:bg-white/8 hover:text-white" onClick={() => { navigator.clipboard?.writeText(shownCodes.join("\n")); toast.success("Коды скопированы") }}>Скопировать</Button><Button className="bg-white text-black hover:bg-white/88" onClick={onContinue}>Я сохранил коды</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
+}
+
+function ResetPasswordDialog({ open, onOpenChange, initialUsername, onComplete }: { open: boolean; onOpenChange: (open: boolean) => void; initialUsername: string; onComplete: (username: string) => void }) {
+  const [username, setUsername] = useState(initialUsername)
+  const [recoveryCode, setRecoveryCode] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [busy, setBusy] = useState(false)
+  const recover = async (event: FormEvent) => {
+    event.preventDefault()
+    if (newPassword.length < 5) { toast.error("Новый пароль — минимум 5 символов"); return }
+    setBusy(true)
+    const result = await backendRequest<{ user?: ServerUser; error?: string }>("/api/auth/recover", { method: "POST", body: JSON.stringify({ username, recoveryCode, newPassword }) })
+    setBusy(false)
+    if (!result.available) { toast.error("Восстановление доступно после запуска сервера"); return }
+    if (!result.ok || !result.data?.user) { toast.error(result.data?.error || "Не удалось восстановить доступ"); return }
+    window.localStorage.setItem(BACKEND_KEY, "1")
+    toast.success("Пароль изменён")
+    onComplete(result.data.user.username)
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[440px] rounded-[24px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle>Восстановление доступа</DialogTitle><DialogDescription className="text-white/42">Введите один из сохранённых кодов. После использования он станет недействительным.</DialogDescription></DialogHeader><form onSubmit={recover} className="space-y-4"><label className="block"><span className="field-label">Юзернейм</span><div className="auth-input-wrap"><AtSign className="size-4 text-white/35" /><Input value={username} onChange={(event) => setUsername(event.target.value.replace(/\s/g, ""))} className="h-auto border-0 bg-transparent p-0 shadow-none focus-visible:ring-0" /></div></label><label className="block"><span className="field-label">Код восстановления</span><div className="auth-input-wrap"><ShieldCheck className="size-4 text-white/35" /><Input value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value.toUpperCase())} placeholder="ABCDE-12345" className="h-auto border-0 bg-transparent p-0 font-mono shadow-none focus-visible:ring-0" /></div></label><label className="block"><span className="field-label">Новый пароль</span><div className="auth-input-wrap"><LockKeyhole className="size-4 text-white/35" /><Input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={5} className="h-auto border-0 bg-transparent p-0 shadow-none focus-visible:ring-0" /></div></label><Button disabled={busy} className="h-12 w-full bg-white text-black hover:bg-white/88">{busy ? "Проверяем…" : "Сменить пароль и войти"}</Button></form></DialogContent></Dialog>
 }
 
 function Messenger({ username, onHome, onSignOut }: { username: string; onHome: () => void; onSignOut: () => void }) {
@@ -492,7 +564,10 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   const [pendingDeleteChat, setPendingDeleteChat] = useState<Chat | null>(null)
   const [theme, setTheme] = useState<AccentTheme>("sand")
   const [backendEnabled, setBackendEnabled] = useState(false)
+  const [backendLoading, setBackendLoading] = useState(false)
   const [remotePeople, setRemotePeople] = useState<typeof people>([])
+  const [typingChats, setTypingChats] = useState<Set<string>>(new Set())
+  const [unreadOnly, setUnreadOnly] = useState(false)
   const [hydrated, setHydrated] = useState(false)
   const [profile, setProfile] = useState<Profile>({ username, name: username.replace(/^@/, "") || "Мой профиль", bio: "В сети", initials: "FG", imageUrl: "" })
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -505,20 +580,27 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   const attachmentRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const activeIdRef = useRef(activeId)
+  const typingTimersRef = useRef<Map<string, number>>(new Map())
 
   const activeChat = chats.find((chat) => chat.id === activeId) ?? chats[0]
-  const filteredChats = chats.filter((chat) => `${chat.name} ${chat.username}`.toLowerCase().includes(query.toLowerCase()))
-  const filteredPeople = query.length >= 2 ? [...remotePeople, ...people.filter((person) => `${person.name} ${person.username}`.toLowerCase().includes(query.toLowerCase()))].filter((person, index, all) => all.findIndex((item) => item.username === person.username) === index) : []
+  const filteredChats = chats.filter((chat) => (!unreadOnly || chat.unread > 0) && `${chat.name} ${chat.username}`.toLowerCase().includes(query.toLowerCase()))
+  const localPeople = backendEnabled ? remotePeople : [...remotePeople, ...people]
+  const filteredPeople = query.length >= 2 ? localPeople.filter((person) => `${person.name} ${person.username}`.toLowerCase().includes(query.toLowerCase())).filter((person, index, all) => all.findIndex((item) => item.username === person.username) === index) : []
+
+  useEffect(() => { activeIdRef.current = activeId }, [activeId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
-        const savedProfile = window.localStorage.getItem(PROFILE_KEY)
-        const savedChats = window.localStorage.getItem(CHATS_KEY)
+        const savedProfile = window.localStorage.getItem(storageKey(PROFILE_KEY, username)) || window.localStorage.getItem(PROFILE_KEY)
+        const savedChats = window.localStorage.getItem(storageKey(CHATS_KEY, username)) || window.localStorage.getItem(CHATS_KEY)
         const savedTheme = window.localStorage.getItem(THEME_KEY) as AccentTheme | null
-        setBackendEnabled(window.localStorage.getItem(BACKEND_KEY) === "1")
+        const hasBackend = window.localStorage.getItem(BACKEND_KEY) === "1"
+        setBackendEnabled(hasBackend)
+        if (hasBackend) { setBackendLoading(true); setChats([]); setActiveId("") }
         if (savedProfile) setProfile({ ...JSON.parse(savedProfile) as Profile, username })
-        if (savedChats) {
+        if (savedChats && !hasBackend) {
           const parsed = JSON.parse(savedChats) as Chat[]
           if (parsed.length) setChats(parsed.map((chat) => ({ ...chat, bio: chat.bio || "Описание пока не добавлено." })))
         }
@@ -535,36 +617,65 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   useEffect(() => {
     if (!hydrated || !backendEnabled) return
     void (async () => {
-      const me = await backendRequest<{ user?: { username: string; name: string; bio: string; avatarUrl: string } }>("/api/me")
-      if (!me.ok || !me.data?.user) return
+      const me = await backendRequest<{ user?: ServerUser }>("/api/me")
+      if (!me.ok || !me.data?.user) {
+        setBackendLoading(false)
+        if (me.status === 401) onSignOut()
+        return
+      }
       const serverProfile = me.data.user
       setProfile((current) => ({ ...current, username: serverProfile.username, name: serverProfile.name, bio: serverProfile.bio, imageUrl: serverProfile.avatarUrl || current.imageUrl, initials: getInitials(serverProfile.name) }))
-      const result = await backendRequest<{ chats?: Array<{ id: string; person: { username: string; name: string; bio: string; avatarUrl: string; online: boolean }; messages: Array<{ id: string; sender: { username: string }; kind: MessageKind; body?: string; duration?: number; mediaUrl?: string; fileName?: string; fileSize?: number; fileType?: string; createdAt: number }> }> }>("/api/chats")
-      if (!result.ok || !result.data?.chats?.length) return
-      const serverChats = result.data.chats.map((chat) => ({ id: `server-${chat.id}`, serverId: chat.id, name: chat.person.name, username: chat.person.username, initials: getInitials(chat.person.name), imageUrl: chat.person.avatarUrl, hue: "from-stone-400 to-stone-800", online: chat.person.online, bio: chat.person.bio, unread: 0, messages: chat.messages.map((message) => ({ id: message.id, sender: message.sender.username === serverProfile.username ? "me" as const : "them" as const, kind: message.kind, body: message.body, duration: message.duration, mediaUrl: message.mediaUrl, fileName: message.fileName, fileSize: message.fileSize, fileType: message.fileType, time: new Date(message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) })) }))
-      setChats((current) => [...serverChats, ...current.filter((chat) => !serverChats.some((serverChat) => serverChat.username === chat.username))])
-      setActiveId((current) => current || serverChats[0].id)
+      const result = await backendRequest<{ chats?: ServerChat[] }>("/api/chats")
+      if (!result.ok) { setBackendLoading(false); toast.error("Не удалось загрузить чаты"); return }
+      const serverChats = (result.data?.chats || []).map((chat) => mapServerChat(chat, serverProfile.username))
+      setChats(serverChats)
+      setActiveId((current) => serverChats.some((chat) => chat.id === current) ? current : serverChats[0]?.id || "")
+      setBackendLoading(false)
     })()
-  }, [backendEnabled, hydrated])
+  }, [backendEnabled, hydrated, onSignOut])
 
   useEffect(() => {
     if (!backendEnabled || query.trim().length < 2) return
     const timer = window.setTimeout(() => {
-      void backendRequest<{ users?: Array<{ username: string; name: string; bio: string }> }>(`/api/users?query=${encodeURIComponent(query)}`).then((result) => {
+      void backendRequest<{ users?: ServerUser[] }>(`/api/users?query=${encodeURIComponent(query)}`).then((result) => {
         if (!result.ok) return
-        setRemotePeople((result.data?.users || []).map((person) => ({ ...person, initials: getInitials(person.name), hue: "from-stone-400 to-amber-800" })))
+        setRemotePeople((result.data?.users || []).map((person) => ({ ...person, imageUrl: person.avatarUrl, initials: getInitials(person.name), hue: "from-stone-400 to-amber-800" })))
       })
     }, 220)
     return () => window.clearTimeout(timer)
   }, [backendEnabled, query])
 
   useEffect(() => {
+    if (!backendEnabled || !activeChat?.serverId) return
+    const serverId = activeChat.serverId
+    if (!draft.trim()) {
+      void backendRequest(`/api/chats/${serverId}/typing`, { method: "POST", body: JSON.stringify({ typing: false }) })
+      return
+    }
+    const start = window.setTimeout(() => void backendRequest(`/api/chats/${serverId}/typing`, { method: "POST", body: JSON.stringify({ typing: true }) }), 180)
+    const stop = window.setTimeout(() => void backendRequest(`/api/chats/${serverId}/typing`, { method: "POST", body: JSON.stringify({ typing: false }) }), 2500)
+    return () => { window.clearTimeout(start); window.clearTimeout(stop) }
+  }, [activeChat?.serverId, backendEnabled, draft])
+
+  useEffect(() => {
+    if (!backendEnabled || !activeChat?.serverId) return
+    const serverId = activeChat.serverId
+    return () => { void backendRequest(`/api/chats/${serverId}/typing`, { method: "POST", body: JSON.stringify({ typing: false }) }) }
+  }, [activeChat?.serverId, backendEnabled])
+
+  useEffect(() => {
     if (!backendEnabled) return
     const events = new EventSource("/api/events", { withCredentials: true })
+    const typingTimers = typingTimersRef.current
     const onMessage = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as { conversationId: string; message: { id: string; sender: { username: string }; kind: MessageKind; body?: string; duration?: number; mediaUrl?: string; fileName?: string; fileSize?: number; fileType?: string; createdAt: number } }
+      const payload = JSON.parse(event.data) as { conversationId: string; message: ServerMessage; chat: ServerChat }
       if (payload.message.sender.username === profile.username) return
-      setChats((current) => current.map((chat) => chat.serverId === payload.conversationId ? { ...chat, unread: chat.id === activeId ? 0 : chat.unread + 1, messages: [...chat.messages, { id: payload.message.id, sender: "them", kind: payload.message.kind, body: payload.message.body, duration: payload.message.duration, mediaUrl: payload.message.mediaUrl, fileName: payload.message.fileName, fileSize: payload.message.fileSize, fileType: payload.message.fileType, time: new Date(payload.message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) }] } : chat))
+      setChats((current) => {
+        const existing = current.find((chat) => chat.serverId === payload.conversationId)
+        if (!existing) return [mapServerChat(payload.chat, profile.username), ...current]
+        return current.map((chat) => chat.serverId === payload.conversationId && !chat.messages.some((message) => message.id === payload.message.id) ? { ...chat, unread: chat.id === activeIdRef.current ? 0 : payload.chat.unread, messages: [...chat.messages, { id: payload.message.id, sender: "them", kind: payload.message.kind, body: payload.message.body, duration: payload.message.duration, mediaUrl: payload.message.mediaUrl, fileName: payload.message.fileName, fileSize: payload.message.fileSize, fileType: payload.message.fileType, time: new Date(payload.message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) }] } : chat)
+      })
+      if (`server-${payload.conversationId}` === activeIdRef.current) void backendRequest(`/api/chats/${payload.conversationId}/read`, { method: "POST" })
     }
     const onProfile = (event: MessageEvent<string>) => {
       const { user } = JSON.parse(event.data) as { user: { username: string; name: string; bio: string; avatarUrl: string } }
@@ -574,22 +685,30 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
       const payload = JSON.parse(event.data) as { username: string; online: boolean }
       setChats((current) => current.map((chat) => chat.username === payload.username ? { ...chat, online: payload.online } : chat))
     }
+    const onTyping = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as { conversationId: string; typing: boolean }
+      const oldTimer = typingTimers.get(payload.conversationId)
+      if (oldTimer) window.clearTimeout(oldTimer)
+      setTypingChats((current) => { const next = new Set(current); if (payload.typing) next.add(payload.conversationId); else next.delete(payload.conversationId); return next })
+      if (payload.typing) typingTimers.set(payload.conversationId, window.setTimeout(() => setTypingChats((current) => { const next = new Set(current); next.delete(payload.conversationId); return next }), 3500))
+    }
     events.addEventListener("message.created", onMessage as EventListener)
     events.addEventListener("profile.updated", onProfile as EventListener)
     events.addEventListener("presence.updated", onPresence as EventListener)
-    return () => events.close()
-  }, [activeId, backendEnabled, profile.username])
+    events.addEventListener("typing.updated", onTyping as EventListener)
+    return () => { events.close(); for (const timer of typingTimers.values()) window.clearTimeout(timer); typingTimers.clear() }
+  }, [backendEnabled, profile.username])
 
   useEffect(() => {
     if (!hydrated) return
-    window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile))
+    window.localStorage.setItem(storageKey(PROFILE_KEY, username), JSON.stringify(profile))
     window.localStorage.setItem(THEME_KEY, theme)
     const serializableChats = chats.map((chat) => ({
       ...chat,
       messages: chat.messages.map((message) => message.mediaUrl?.startsWith("blob:") ? { ...message, mediaUrl: undefined } : message),
     }))
-    window.localStorage.setItem(CHATS_KEY, JSON.stringify(serializableChats))
-  }, [chats, hydrated, profile, theme])
+    if (!backendEnabled) window.localStorage.setItem(storageKey(CHATS_KEY, username), JSON.stringify(serializableChats))
+  }, [backendEnabled, chats, hydrated, profile, theme, username])
 
   const sendToBackend = useCallback(async (chat: Chat, message: Omit<Message, "id" | "time">) => {
     if (!backendEnabled) return
@@ -605,10 +724,12 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
       try {
         const blob = await fetch(mediaUrl).then((response) => response.blob())
         const uploaded = await backendRequest<{ url?: string }>("/api/uploads", { method: "POST", body: JSON.stringify({ name: message.fileName || `${message.kind}.webm`, dataUrl: await fileToDataUrl(blob) }) })
-        if (uploaded.ok && uploaded.data?.url) mediaUrl = uploaded.data.url
-      } catch { toast.error("Медиа осталось только на этом устройстве") }
+        if (!uploaded.ok || !uploaded.data?.url) { toast.error("Не удалось загрузить вложение"); return }
+        mediaUrl = uploaded.data.url
+      } catch { toast.error("Не удалось загрузить вложение"); return }
     }
-    await backendRequest(`/api/chats/${serverId}/messages`, { method: "POST", body: JSON.stringify({ ...message, mediaUrl }) })
+    const sent = await backendRequest<{ error?: string }>(`/api/chats/${serverId}/messages`, { method: "POST", body: JSON.stringify({ ...message, mediaUrl }) })
+    if (!sent.ok) toast.error(sent.data?.error || "Сообщение не доставлено")
   }, [backendEnabled])
 
   const pushMessage = useCallback((message: Omit<Message, "id" | "time">) => {
@@ -618,9 +739,11 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   }, [activeId, chats, sendToBackend])
 
   const openChat = (id: string) => {
+    const chat = chats.find((item) => item.id === id)
     setActiveId(id)
     setChats((current) => current.map((chat) => chat.id === id ? { ...chat, unread: 0 } : chat))
     setMobileChatOpen(true)
+    if (backendEnabled && chat?.serverId) void backendRequest(`/api/chats/${chat.serverId}/read`, { method: "POST" })
   }
 
   const sendText = (event: FormEvent) => {
@@ -694,15 +817,10 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
 
   const deleteChat = () => {
     if (!pendingDeleteChat) return
-    if (chats.length === 1) {
-      toast.info("Последний чат оставлен, чтобы экран не был пустым")
-      setPendingDeleteChat(null)
-      return
-    }
     if (backendEnabled && pendingDeleteChat.serverId) void backendRequest(`/api/chats/${pendingDeleteChat.serverId}`, { method: "DELETE" })
     const nextChats = chats.filter((chat) => chat.id !== pendingDeleteChat.id)
     setChats(nextChats)
-    if (activeId === pendingDeleteChat.id) setActiveId(nextChats[0].id)
+    if (activeId === pendingDeleteChat.id) setActiveId(nextChats[0]?.id || "")
     setMobileChatOpen(false)
     setPendingDeleteChat(null)
     toast.success("Чат удалён")
@@ -750,6 +868,7 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
         execute: (input) => {
           const text = typeof input === "object" && input !== null && "text" in input ? String((input as { text: unknown }).text).trim() : ""
           if (!text || text.length > 4000) throw new Error("Сообщение должно содержать от 1 до 4000 символов.")
+          if (!activeChat) throw new Error("Сначала откройте чат.")
           pushMessage({ sender: "me", kind: "text", body: text })
           return { status: "sent", chat: activeChat.username, text }
         },
@@ -757,14 +876,14 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
     }
     void register().catch(() => undefined)
     return () => lifecycle.abort()
-  }, [activeChat.username, chats, pushMessage])
+  }, [activeChat, chats, pushMessage])
 
   return (
     <motion.main data-accent={theme} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="messenger-shell h-svh overflow-hidden bg-[#060607]">
       <TooltipProvider delayDuration={120}>
         <nav className="nav-rail">
           <button onClick={onHome} aria-label="На главную"><Brand compact /></button>
-          <div className="mt-7 flex flex-1 flex-col items-center gap-2"><RailButton label="Чаты" active icon={MessageCircle} /><RailButton label="Люди" icon={UsersRound} /><RailButton label="Уведомления" icon={Bell} /></div>
+          <div className="mt-7 flex flex-1 flex-col items-center gap-2"><RailButton label="Чаты" active={!unreadOnly} icon={MessageCircle} onClick={() => setUnreadOnly(false)} /><RailButton label="Найти человека" icon={UsersRound} onClick={() => { setUnreadOnly(false); searchRef.current?.focus() }} /><RailButton label="Непрочитанные" active={unreadOnly} icon={Bell} onClick={() => setUnreadOnly((value) => !value)} /></div>
           <RailButton label="На главную" icon={Home} onClick={onHome} />
           <RailButton label="Настройки" icon={Settings} onClick={() => setSettingsOpen(true)} />
           <RailButton label="Выйти" icon={LogOut} onClick={onSignOut} />
@@ -774,29 +893,34 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
           <div className="px-4 pb-3"><div className="search-field"><Search className="size-4 text-white/30" /><Input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти по юзернейму" className="search-input h-auto border-0 bg-transparent p-0 text-sm shadow-none placeholder:text-white/27 focus-visible:ring-0" />{query && <button onClick={() => setQuery("")} aria-label="Очистить поиск"><X className="size-4 text-white/35" /></button>}</div></div>
           <div className="scrollbar-none flex-1 overflow-y-auto px-2 pb-4">
             <AnimatePresence initial={false}>{filteredPeople.map((person) => (
-              <motion.button key={person.username} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} whileTap={{ scale: 0.985 }} onClick={() => startChat(person)} className="person-result"><Avatar initials={person.initials} hue={person.hue} /><span className="min-w-0 flex-1 text-left"><strong className="block truncate text-sm font-medium">{person.name}</strong><span className="mt-1 block text-xs text-white/35">{person.username}</span></span><span className="rounded-full border border-white/9 px-3 py-1.5 text-xs text-white/56">Написать</span></motion.button>
+              <motion.button key={person.username} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} whileTap={{ scale: 0.985 }} onClick={() => startChat(person)} className="person-result"><Avatar initials={person.initials} hue={person.hue} imageUrl={"imageUrl" in person && typeof person.imageUrl === "string" ? person.imageUrl : ""} /><span className="min-w-0 flex-1 text-left"><strong className="block truncate text-sm font-medium">{person.name}</strong><span className="mt-1 block text-xs text-white/35">{person.username}</span></span><span className="rounded-full border border-white/9 px-3 py-1.5 text-xs text-white/56">Написать</span></motion.button>
             ))}</AnimatePresence>
             {filteredChats.map((chat) => {
               const last = chat.messages.at(-1)
               return <motion.button key={chat.id} whileTap={{ scale: 0.985 }} onPointerDown={() => beginLongPress(chat)} onPointerUp={cancelLongPress} onPointerCancel={cancelLongPress} onPointerLeave={cancelLongPress} onContextMenu={(event) => { event.preventDefault(); cancelLongPress(); setPendingDeleteChat(chat) }} onClick={() => { if (suppressClickRef.current) { suppressClickRef.current = false; return } openChat(chat.id) }} className={chat.id === activeId ? "chat-row chat-row-active" : "chat-row"}><div className="relative"><Avatar initials={chat.initials} hue={chat.hue} imageUrl={chat.imageUrl} /><span className={chat.online ? "presence presence-online" : "presence"} /></div><span className="min-w-0 flex-1 text-left"><span className="flex items-center justify-between gap-2"><strong className="truncate text-[15px] font-medium">{chat.name}</strong><small className="text-[11px] text-white/25">{last?.time}</small></span><span className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-sm text-white/38">{last?.kind === "voice" ? "Голосовое сообщение" : last?.kind === "video" ? "Кружочек" : last?.kind === "file" ? `Файл: ${last.fileName ?? "вложение"}` : last?.body || "Сообщений пока нет"}</span>{chat.unread > 0 && <span className="grid size-5 shrink-0 place-items-center rounded-full bg-white text-[10px] font-semibold text-black">{chat.unread}</span>}</span></span></motion.button>
             })}
+            {filteredPeople.length === 0 && filteredChats.length === 0 && <div className="px-5 py-12 text-center"><p className="text-sm text-white/42">{backendLoading ? "Загружаем диалоги…" : unreadOnly ? "Непрочитанных сообщений нет" : query ? "Никого не нашли" : "Пока нет диалогов"}</p>{!backendLoading && !query && !unreadOnly && <p className="mt-2 text-xs leading-5 text-white/25">Введите юзернейм в поиске, чтобы начать разговор.</p>}</div>}
           </div>
         </aside>
         <section className={mobileChatOpen ? "conversation conversation-open" : "conversation"}>
-          <header className="conversation-header"><Button variant="ghost" size="icon" onClick={() => setMobileChatOpen(false)} className="mobile-back rounded-full text-white hover:bg-white/7 hover:text-white" aria-label="Назад к чатам"><ArrowLeft /></Button><button onClick={() => setChatInfoOpen(true)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left" aria-label="Открыть профиль собеседника"><Avatar initials={activeChat.initials} hue={activeChat.hue} imageUrl={activeChat.imageUrl} small /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{activeChat.name}</span><span className="mt-0.5 block text-xs text-white/35">{activeChat.online ? "в сети" : activeChat.username}</span></span></button></header>
+          {activeChat ? <><header className="conversation-header"><Button variant="ghost" size="icon" onClick={() => setMobileChatOpen(false)} className="mobile-back rounded-full text-white hover:bg-white/7 hover:text-white" aria-label="Назад к чатам"><ArrowLeft /></Button><button onClick={() => setChatInfoOpen(true)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left" aria-label="Открыть профиль собеседника"><Avatar initials={activeChat.initials} hue={activeChat.hue} imageUrl={activeChat.imageUrl} small /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{activeChat.name}</span><span className="mt-0.5 block text-xs text-white/35">{activeChat.serverId && typingChats.has(activeChat.serverId) ? "печатает…" : activeChat.online ? "в сети" : activeChat.username}</span></span></button></header>
           <MessageArea chat={activeChat} />
           <div className="composer-wrap"><AnimatePresence>{recording && <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="recording-bar"><span className="recording-dot" /><strong>{formatDuration(recordSeconds)}</strong><span className="text-white/38">Идёт запись</span><button onClick={() => stopVoice(false)} className="ml-auto rounded-full px-3 py-1.5 text-sm text-white/46 hover:bg-white/7 hover:text-white">Отменить</button><Button size="icon" onClick={() => stopVoice(true)} className="rounded-full bg-white text-black hover:bg-white/88"><Send /></Button></motion.div>}</AnimatePresence>
             {!recording && <><input ref={attachmentRef} type="file" className="hidden" onChange={(event) => { attachFile(event.target.files?.[0]); event.currentTarget.value = "" }} /><form onSubmit={sendText} className="composer"><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Прикрепить файл" onClick={() => attachmentRef.current?.click()}><Paperclip /></Button><Textarea ref={composerRef} rows={1} value={draft} maxLength={4000} onChange={(event) => setDraft(event.target.value)} onInput={(event) => { const field = event.currentTarget; field.style.height = "auto"; field.style.height = `${Math.min(field.scrollHeight, 132)}px` }} placeholder="Сообщение" className="message-composer min-h-0 flex-1 resize-none border-0 bg-transparent px-1 py-2 text-base shadow-none placeholder:text-white/25 focus-visible:ring-0" /><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Записать кружочек" onClick={() => setVideoOpen(true)}><Camera /></Button>{draft.trim() ? <Button type="submit" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label="Отправить"><Send /></Button> : <Button type="button" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label="Записать голосовое" onClick={startVoice}><Mic /></Button>}</form></>}
-          </div>
+          </div></> : <EmptyConversation loading={backendLoading} onSearch={() => { setMobileChatOpen(false); window.setTimeout(() => searchRef.current?.focus(), 80) }} />}
         </section>
         <VideoRecorderDialog open={videoOpen} onOpenChange={setVideoOpen} onSend={(url, duration) => pushMessage({ sender: "me", kind: "video", mediaUrl: url, duration })} />
         {profileOpen && <ProfileDialog open onOpenChange={setProfileOpen} profile={profile} onSave={saveProfile} />}
         <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} profile={profile} theme={theme} onThemeChange={setTheme} onEditProfile={() => { setSettingsOpen(false); setProfileOpen(true) }} onHome={() => { setSettingsOpen(false); onHome() }} onSignOut={onSignOut} />
-        <ChatInfoDialog open={chatInfoOpen} onOpenChange={setChatInfoOpen} chat={activeChat} />
-        <Dialog open={Boolean(pendingDeleteChat)} onOpenChange={(open) => { if (!open) setPendingDeleteChat(null) }}><DialogContent className="max-w-[390px] rounded-[24px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle>Удалить чат?</DialogTitle><DialogDescription className="text-white/42">История с {pendingDeleteChat?.name} исчезнет с этого устройства.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" className="border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => setPendingDeleteChat(null)}>Отмена</Button><Button variant="destructive" onClick={deleteChat}><Trash2 className="mr-2 size-4" />Удалить</Button></DialogFooter></DialogContent></Dialog>
+        {activeChat && <ChatInfoDialog open={chatInfoOpen} onOpenChange={setChatInfoOpen} chat={activeChat} />}
+        <Dialog open={Boolean(pendingDeleteChat)} onOpenChange={(open) => { if (!open) setPendingDeleteChat(null) }}><DialogContent className="max-w-[390px] rounded-[24px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle>Удалить чат?</DialogTitle><DialogDescription className="text-white/42">Диалог с {pendingDeleteChat?.name} исчезнет из вашего списка. У собеседника история останется.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" className="border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => setPendingDeleteChat(null)}>Отмена</Button><Button variant="destructive" onClick={deleteChat}><Trash2 className="mr-2 size-4" />Удалить</Button></DialogFooter></DialogContent></Dialog>
       </TooltipProvider>
     </motion.main>
   )
+}
+
+function EmptyConversation({ loading, onSearch }: { loading: boolean; onSearch: () => void }) {
+  return <div className="m-auto flex max-w-sm flex-col items-center px-6 text-center"><div className="grid size-16 place-items-center rounded-[22px] border border-white/9 bg-white/[0.035]">{loading ? <span className="size-5 animate-spin rounded-full border-2 border-white/20 border-t-white/70" /> : <UsersRound className="size-6 text-white/55" />}</div><h2 className="mt-5 text-xl font-medium">{loading ? "Подключаемся…" : "Начните новый разговор"}</h2><p className="mt-2 text-sm leading-6 text-white/38">{loading ? "Загружаем профиль и историю сообщений." : "Найдите человека по юзернейму — чат появится после первого сообщения."}</p>{!loading && <Button onClick={onSearch} className="mt-6 rounded-full bg-white px-5 text-black hover:bg-white/88"><Search className="mr-2 size-4" />Найти человека</Button>}</div>
 }
 
 function RailButton({ label, icon: Icon, active = false, onClick }: { label: string; icon: typeof Menu; active?: boolean; onClick?: () => void }) {

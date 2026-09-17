@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSa
 import { createReadStream } from "node:fs"
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
-import { extname, join, normalize, resolve } from "node:path"
+import { extname, join, normalize, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 
 const scrypt = promisify(scryptCallback)
@@ -21,6 +21,7 @@ const authAttempts = new Map()
 let persistQueue = Promise.resolve()
 
 const mimeTypes = {
+  ".aac": "audio/aac",
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
   ".html": "text/html; charset=utf-8",
@@ -31,14 +32,35 @@ const mimeTypes = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".ogg": "audio/ogg",
+  ".pdf": "application/pdf",
   ".svg": "image/svg+xml",
+  ".txt": "text/plain; charset=utf-8",
   ".webm": "video/webm",
   ".webp": "image/webp",
   ".woff2": "font/woff2",
+  ".zip": "application/zip",
 }
 
-const emptyDatabase = () => ({ users: [], sessions: [], conversations: [], messages: [] })
+const emptyDatabase = () => ({ version: 2, users: [], sessions: [], conversations: [], messages: [] })
 let database = emptyDatabase()
+
+const recoveryAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+function createRecoveryCodes(count = 8) {
+  return Array.from({ length: count }, () => {
+    const bytes = randomBytes(10)
+    const value = Array.from(bytes, (byte) => recoveryAlphabet[byte % recoveryAlphabet.length]).join("")
+    return `${value.slice(0, 5)}-${value.slice(5)}`
+  })
+}
+
+function normalizeRecoveryCode(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "")
+}
 
 function normalizeUsername(value) {
   return String(value || "").trim().replace(/^@/, "").toLowerCase()
@@ -113,7 +135,7 @@ function getSessionUser(request) {
 
 async function createSession(response, userId) {
   const token = randomBytes(32).toString("base64url")
-  database.sessions = database.sessions.filter((session) => session.expiresAt > Date.now() && session.userId !== userId)
+  database.sessions = database.sessions.filter((session) => session.expiresAt > Date.now())
   database.sessions.push({ id: randomUUID(), userId, tokenHash: hashToken(token), expiresAt: Date.now() + sessionMaxAge * 1000 })
   await persist()
   const cookie = [`fg_session=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionMaxAge}`]
@@ -136,6 +158,15 @@ function rateLimited(request) {
   return attempts.length > 12
 }
 
+function originAllowed(request) {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method || "GET")) return true
+  const origin = request.headers.origin
+  if (!origin) return true
+  if (allowedOrigin) return origin === allowedOrigin
+  const protocol = String(request.headers["x-forwarded-proto"] || (secureCookie ? "https" : "http")).split(",")[0].trim()
+  return origin === `${protocol}://${request.headers.host}`
+}
+
 function getConversationForUser(id, userId) {
   return database.conversations.find((conversation) => conversation.id === id && conversation.participants.includes(userId))
 }
@@ -149,7 +180,9 @@ function serializeConversation(conversation, currentUserId) {
   const otherId = conversation.participants.find((id) => id !== currentUserId) || currentUserId
   const other = database.users.find((user) => user.id === otherId)
   const messages = database.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt - b.createdAt)
-  return { id: conversation.id, person: other ? publicUser(other) : null, messages: messages.map(serializeMessage), updatedAt: conversation.updatedAt }
+  const readAt = Number(conversation.readAt?.[currentUserId] || 0)
+  const unread = messages.filter((message) => message.senderId !== currentUserId && message.createdAt > readAt).length
+  return { id: conversation.id, person: other ? publicUser(other) : null, messages: messages.map(serializeMessage), unread, updatedAt: conversation.updatedAt }
 }
 
 function broadcast(userIds, event, payload) {
@@ -158,7 +191,7 @@ function broadcast(userIds, event, payload) {
 }
 
 async function handleApi(request, response, url) {
-  if (allowedOrigin && request.headers.origin && request.headers.origin !== allowedOrigin) return json(response, 403, { error: "Origin is not allowed" })
+  if (!originAllowed(request)) return json(response, 403, { error: "Origin is not allowed" })
   if (url.pathname === "/api/health" && request.method === "GET") return json(response, 200, { ok: true, service: "favourite-gram", host: "Wispbyte" })
 
   if ((url.pathname === "/api/auth/register" || url.pathname === "/api/auth/login") && request.method === "POST") {
@@ -172,14 +205,38 @@ async function handleApi(request, response, url) {
     if (url.pathname.endsWith("register")) {
       if (user) return json(response, 409, { error: "Этот юзернейм уже занят." })
       const passwordData = await hashPassword(password)
-      user = { id: randomUUID(), username, passwordSalt: passwordData.salt, passwordHash: passwordData.hash, name: username, bio: "В сети", avatarUrl: "", createdAt: Date.now(), updatedAt: Date.now() }
+      const recoveryCodes = createRecoveryCodes()
+      user = { id: randomUUID(), username, passwordSalt: passwordData.salt, passwordHash: passwordData.hash, recoveryCodeHashes: recoveryCodes.map((code) => hashToken(normalizeRecoveryCode(code))), name: username, bio: "В сети", avatarUrl: "", createdAt: Date.now(), updatedAt: Date.now() }
       database.users.push(user)
       await persist()
+      await createSession(response, user.id)
+      return json(response, 201, { user: publicUser(user), recoveryCodes })
     } else {
       if (!user || !(await verifyPassword(password, user.passwordSalt, user.passwordHash))) return json(response, 401, { error: "Неверный юзернейм или пароль." })
     }
     await createSession(response, user.id)
     return json(response, 200, { user: publicUser(user) })
+  }
+
+  if (url.pathname === "/api/auth/recover" && request.method === "POST") {
+    if (rateLimited(request)) return json(response, 429, { error: "Слишком много попыток. Подождите минуту." })
+    const body = await readBody(request)
+    const username = normalizeUsername(body.username)
+    const password = String(body.newPassword || "")
+    const codeHash = hashToken(normalizeRecoveryCode(body.recoveryCode))
+    const user = database.users.find((item) => item.username === username)
+    const index = user?.recoveryCodeHashes?.findIndex((item) => item === codeHash) ?? -1
+    if (!user || index < 0) return json(response, 401, { error: "Неверный юзернейм или код восстановления." })
+    if (password.length < 5 || password.length > 256) return json(response, 400, { error: "Новый пароль должен содержать от 5 до 256 символов." })
+    const passwordData = await hashPassword(password)
+    user.passwordSalt = passwordData.salt
+    user.passwordHash = passwordData.hash
+    user.recoveryCodeHashes.splice(index, 1)
+    user.updatedAt = Date.now()
+    database.sessions = database.sessions.filter((session) => session.userId !== user.id)
+    await persist()
+    await createSession(response, user.id)
+    return json(response, 200, { user: publicUser(user), recoveryCodesLeft: user.recoveryCodeHashes.length })
   }
 
   if (url.pathname === "/api/auth/logout" && request.method === "POST") {
@@ -198,7 +255,7 @@ async function handleApi(request, response, url) {
     const body = await readBody(request)
     if (typeof body.name === "string") user.name = body.name.trim().slice(0, 48) || user.username
     if (typeof body.bio === "string") user.bio = body.bio.trim().slice(0, 160)
-    if (typeof body.avatarUrl === "string") user.avatarUrl = body.avatarUrl.slice(0, 512)
+    if (typeof body.avatarUrl === "string" && (!body.avatarUrl || /^\/uploads\/[a-f0-9-]+\.[a-z0-9]+$/i.test(body.avatarUrl))) user.avatarUrl = body.avatarUrl.slice(0, 512)
     user.updatedAt = Date.now()
     await persist()
     broadcast(database.users.map((item) => item.id), "profile.updated", { user: publicUser(user) })
@@ -222,7 +279,7 @@ async function handleApi(request, response, url) {
     if (!target || target.id === user.id) return json(response, 404, { error: "Пользователь не найден." })
     let conversation = database.conversations.find((item) => item.participants.length === 2 && item.participants.includes(user.id) && item.participants.includes(target.id))
     if (!conversation) {
-      conversation = { id: randomUUID(), participants: [user.id, target.id], hiddenFor: [], createdAt: Date.now(), updatedAt: Date.now() }
+      conversation = { id: randomUUID(), participants: [user.id, target.id], hiddenFor: [], readAt: { [user.id]: Date.now(), [target.id]: 0 }, createdAt: Date.now(), updatedAt: Date.now() }
       database.conversations.push(conversation)
     } else conversation.hiddenFor = (conversation.hiddenFor || []).filter((id) => id !== user.id)
     await persist()
@@ -238,6 +295,26 @@ async function handleApi(request, response, url) {
     return json(response, 200, { ok: true })
   }
 
+  const readMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/read$/)
+  if (readMatch && request.method === "POST") {
+    const conversation = getConversationForUser(readMatch[1], user.id)
+    if (!conversation) return json(response, 404, { error: "Чат не найден." })
+    conversation.readAt = { ...(conversation.readAt || {}), [user.id]: Date.now() }
+    await persist()
+    const otherIds = conversation.participants.filter((id) => id !== user.id)
+    broadcast(otherIds, "chat.read", { conversationId: conversation.id, username: `@${user.username}`, readAt: conversation.readAt[user.id] })
+    return json(response, 200, { ok: true })
+  }
+
+  const typingMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/typing$/)
+  if (typingMatch && request.method === "POST") {
+    const conversation = getConversationForUser(typingMatch[1], user.id)
+    if (!conversation) return json(response, 404, { error: "Чат не найден." })
+    const body = await readBody(request)
+    broadcast(conversation.participants.filter((id) => id !== user.id), "typing.updated", { conversationId: conversation.id, username: `@${user.username}`, typing: Boolean(body.typing) })
+    return json(response, 200, { ok: true })
+  }
+
   const messageMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages$/)
   if (messageMatch && request.method === "POST") {
     const conversation = getConversationForUser(messageMatch[1], user.id)
@@ -246,13 +323,18 @@ async function handleApi(request, response, url) {
     const kind = ["text", "voice", "video", "file"].includes(body.kind) ? body.kind : "text"
     const text = String(body.body || "").trim().slice(0, 4000)
     if (kind === "text" && !text) return json(response, 400, { error: "Пустое сообщение отправить нельзя." })
-    const message = { id: randomUUID(), conversationId: conversation.id, senderId: user.id, kind, body: text, duration: Number(body.duration || 0), mediaUrl: String(body.mediaUrl || "").slice(0, 512), fileName: String(body.fileName || "").slice(0, 180), fileSize: Number(body.fileSize || 0), fileType: String(body.fileType || "").slice(0, 120), createdAt: Date.now() }
+    const mediaUrl = String(body.mediaUrl || "").slice(0, 512)
+    if (kind !== "text" && !/^\/uploads\/[a-f0-9-]+\.[a-z0-9]+$/i.test(mediaUrl)) return json(response, 400, { error: "Сначала загрузите вложение." })
+    const message = { id: randomUUID(), conversationId: conversation.id, senderId: user.id, kind, body: text, duration: Math.max(0, Math.min(3600, Number(body.duration || 0))), mediaUrl, fileName: String(body.fileName || "").slice(0, 180), fileSize: Math.max(0, Number(body.fileSize || 0)), fileType: String(body.fileType || "").slice(0, 120), createdAt: Date.now() }
     database.messages.push(message)
     conversation.updatedAt = message.createdAt
     conversation.hiddenFor = []
+    conversation.readAt = { ...(conversation.readAt || {}), [user.id]: message.createdAt }
     await persist()
     const serialized = serializeMessage(message)
-    broadcast(conversation.participants, "message.created", { conversationId: conversation.id, message: serialized })
+    for (const participantId of conversation.participants) {
+      broadcast([participantId], "message.created", { conversationId: conversation.id, message: serialized, chat: serializeConversation(conversation, participantId) })
+    }
     return json(response, 201, { message: serialized })
   }
 
@@ -262,7 +344,8 @@ async function handleApi(request, response, url) {
     if (!match) return json(response, 400, { error: "Неверный формат файла." })
     const bytes = Buffer.from(match[2], "base64")
     if (bytes.length > 25 * 1024 * 1024) return json(response, 413, { error: "Файл больше 25 МБ." })
-    const extension = extname(String(body.name || "")).replace(/[^.a-z0-9]/gi, "").slice(0, 10)
+    const extensionByMime = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "video/webm": ".webm", "video/mp4": ".mp4", "application/pdf": ".pdf", "text/plain": ".txt", "application/zip": ".zip" }
+    const extension = extensionByMime[match[1].toLowerCase()] || ".bin"
     const fileName = `${randomUUID()}${extension}`
     await writeFile(join(uploadsDir, fileName), bytes, { mode: 0o600 })
     return json(response, 201, { url: `/uploads/${fileName}`, type: match[1], size: bytes.length })
@@ -306,9 +389,9 @@ async function serveStatic(request, response, url) {
   }
   const decoded = decodeURIComponent(url.pathname)
   const relative = normalize(decoded).replace(/^(\.\.(\/|\\|$))+/, "").replace(/^[/\\]+/, "")
-  const candidates = relative ? [join(publicDir, relative), join(publicDir, relative, "index.html")] : [join(publicDir, "index.html")]
+  const candidates = relative ? [resolve(publicDir, relative), resolve(publicDir, relative, "index.html")] : [resolve(publicDir, "index.html")]
   for (const candidate of candidates) {
-    if (!candidate.startsWith(publicDir)) continue
+    if (candidate !== publicDir && !candidate.startsWith(`${publicDir}${sep}`)) continue
     try { if (await serveFile(response, candidate, !candidate.endsWith(".html"))) return } catch {}
   }
   try { if (await serveFile(response, join(publicDir, "404.html"), false)) return } catch {}
@@ -317,8 +400,15 @@ async function serveStatic(request, response, url) {
 
 async function initialize() {
   await mkdir(uploadsDir, { recursive: true })
-  try { database = { ...emptyDatabase(), ...JSON.parse(await readFile(databaseFile, "utf8")) } }
-  catch { await persist() }
+  try {
+    const parsed = JSON.parse(await readFile(databaseFile, "utf8"))
+    if (![parsed.users, parsed.sessions, parsed.conversations, parsed.messages].every(Array.isArray)) throw new Error("Database has an invalid shape")
+    database = { ...emptyDatabase(), ...parsed, version: 2 }
+    for (const conversation of database.conversations) conversation.readAt ||= {}
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+    await persist()
+  }
   database.sessions = database.sessions.filter((session) => session.expiresAt > Date.now())
 }
 

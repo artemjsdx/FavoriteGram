@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "node server/index.mjs",
     "start:wispbyte": "node server/index.mjs",
+    "test": "node --test test/backend.test.mjs",
     "lint": "eslint . --ignore-pattern .next --ignore-pattern out"
   },
   "dependencies": {
