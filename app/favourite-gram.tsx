@@ -18,13 +18,15 @@ import {
   Camera,
   Check,
   Circle,
+  Download,
+  Eye,
+  EyeOff,
+  FileText,
   ImagePlus,
-  Info,
   LockKeyhole,
   Menu,
   MessageCircle,
   Mic,
-  MoreHorizontal,
   Paperclip,
   Pause,
   Play,
@@ -61,7 +63,7 @@ import {
 } from "@/components/ui/tooltip"
 
 type Screen = "landing" | "auth" | "messenger"
-type MessageKind = "text" | "voice" | "video"
+type MessageKind = "text" | "voice" | "video" | "file"
 
 type Message = {
   id: string
@@ -70,6 +72,9 @@ type Message = {
   body?: string
   duration?: number
   mediaUrl?: string
+  fileName?: string
+  fileSize?: number
+  fileType?: string
   time: string
 }
 
@@ -82,6 +87,13 @@ type Chat = {
   online: boolean
   unread: number
   messages: Message[]
+}
+
+type Profile = {
+  name: string
+  bio: string
+  initials: string
+  imageUrl: string
 }
 
 type WebMCPContext = {
@@ -191,7 +203,6 @@ function Brand({ compact = false }: { compact?: boolean }) {
 }
 
 function Landing({ onOpenAuth, reducedMotion }: { onOpenAuth: (mode: "signup" | "login") => void; reducedMotion: boolean }) {
-  const title = "Свои люди — ближе."
   return (
     <motion.main
       initial={{ opacity: 0 }}
@@ -200,17 +211,17 @@ function Landing({ onOpenAuth, reducedMotion }: { onOpenAuth: (mode: "signup" | 
       transition={{ duration: reducedMotion ? 0.01 : 0.35 }}
       className="relative min-h-svh overflow-hidden bg-[#050506]"
     >
-      <div className="absolute inset-0 opacity-90" aria-hidden="true">
-        <MeshGradient className="h-full w-full" colors={["#030303", "#151515", "#29292d", "#f1f1f1"]} speed={reducedMotion ? 0 : 0.18} />
+      <div className="landing-shader absolute inset-0 opacity-95" aria-hidden="true">
+        <MeshGradient className="h-full w-full" colors={["#0b0a0a", "#2d2925", "#756754", "#d8cdbb"]} distortion={0.72} swirl={0.34} grainMixer={0.18} grainOverlay={0.12} maxPixelCount={680000} minPixelRatio={0.55} speed={reducedMotion ? 0 : 0.11} />
       </div>
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_0,rgba(5,5,6,.08)_42%,rgba(5,5,6,.86)_100%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_34%,transparent_0,rgba(5,5,6,.12)_44%,rgba(5,5,6,.9)_100%)]" />
       <div className="noise-layer absolute inset-0 opacity-[0.11]" aria-hidden="true" />
 
       <header className="relative z-20 mx-auto flex w-full max-w-[1240px] items-center justify-between px-5 py-5 sm:px-8 lg:px-10">
         <Brand />
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <Button variant="ghost" className="rounded-full px-4 text-white/72 hover:bg-white/8 hover:text-white" onClick={() => onOpenAuth("login")}>Войти</Button>
-          <Button className="rounded-full bg-white px-5 text-black hover:bg-white/88" onClick={() => onOpenAuth("signup")}>Создать аккаунт</Button>
+          <Button className="hidden rounded-full bg-white px-5 text-black hover:bg-white/88 sm:inline-flex" onClick={() => onOpenAuth("signup")}>Создать аккаунт</Button>
         </div>
       </header>
 
@@ -221,19 +232,11 @@ function Landing({ onOpenAuth, reducedMotion }: { onOpenAuth: (mode: "signup" | 
         <motion.h1
           initial="hidden"
           animate="visible"
-          variants={{ hidden: {}, visible: { transition: { staggerChildren: reducedMotion ? 0 : 0.035 } } }}
-          className="flex max-w-[940px] flex-wrap justify-center text-balance text-[clamp(3.35rem,9vw,7.4rem)] font-semibold leading-[0.88] tracking-[-0.075em] text-white"
+          variants={{ hidden: {}, visible: { transition: { staggerChildren: reducedMotion ? 0 : 0.11 } } }}
+          className="landing-title"
         >
-          {title.split("").map((char, index) => (
-            <motion.span
-              key={`${char}-${index}`}
-              variants={{
-                hidden: { opacity: 0, y: reducedMotion ? 0 : 28, filter: reducedMotion ? "none" : "blur(8px)" },
-                visible: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.5, ease } },
-              }}
-              className={char === " " ? "w-[0.22em]" : ""}
-            >{char}</motion.span>
-          ))}
+          <motion.span className="landing-title-main" variants={{ hidden: { opacity: 0, y: reducedMotion ? 0 : 28, filter: reducedMotion ? "none" : "blur(8px)" }, visible: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.58, ease } } }}>Свои люди</motion.span>
+          <motion.span className="landing-title-accent" variants={{ hidden: { opacity: 0, y: reducedMotion ? 0 : 28, filter: reducedMotion ? "none" : "blur(8px)" }, visible: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.58, ease } } }}><span className="landing-title-dash">—</span>ближе.</motion.span>
         </motion.h1>
         <motion.p initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: reducedMotion ? 0 : 0.75, duration: 0.5, ease }} className="mt-7 max-w-[620px] text-balance text-base leading-7 text-white/60 sm:text-lg">
           Веб-мессенджер без привязки к номеру телефона. Для старта нужны только юзернейм и пароль.
@@ -296,10 +299,10 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
 
   const strength = useMemo(() => {
     let score = 0
+    if (password.length >= 5) score++
     if (password.length >= 8) score++
-    if (password.length >= 12) score++
     if (/[A-Za-zА-Яа-я]/.test(password) && /\d/.test(password)) score++
-    if (/[^A-Za-zА-Яа-я0-9]/.test(password) || password.length >= 18) score++
+    if (/[^A-Za-zА-Яа-я0-9]/.test(password) || password.length >= 12) score++
     return score
   }, [password])
 
@@ -307,7 +310,7 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
     event.preventDefault()
     setError("")
     if (!/^[a-z0-9_]{3,32}$/i.test(username)) { setError("Юзернейм: 3–32 символа, латиница, цифры и подчёркивание."); setStatus("error"); return }
-    if (password.length < 12) { setError("Используйте не меньше 12 символов."); setStatus("error"); return }
+    if (password.length < 5) { setError("Используйте не меньше 5 символов."); setStatus("error"); return }
     setStatus("checking")
     window.setTimeout(() => {
       setStatus("success")
@@ -317,18 +320,18 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
   const resetStatus = () => { if (status === "error") setStatus("idle") }
 
   return (
-    <motion.main initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: reducedMotion ? 0.01 : 0.32, ease }} className="relative grid min-h-svh place-items-center overflow-hidden bg-[#050506] px-5 py-16">
-      <div className="absolute inset-0 opacity-55" aria-hidden="true"><MeshGradient className="h-full w-full" colors={["#050506", "#121217", "#35353d", "#d9d9df"]} speed={reducedMotion ? 0 : 0.12} /></div>
+    <motion.main initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: reducedMotion ? 0.01 : 0.32, ease }} className="auth-screen relative bg-[#050506]">
+      <div className="absolute inset-0 opacity-55" aria-hidden="true"><MeshGradient className="h-full w-full" colors={["#050506", "#171513", "#3b352f", "#b9ae9d"]} distortion={0.68} swirl={0.28} maxPixelCount={520000} minPixelRatio={0.5} speed={reducedMotion ? 0 : 0.08} /></div>
       <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" />
       <Button variant="ghost" size="icon" aria-label="Вернуться на главную" onClick={onBack} className="absolute left-5 top-5 z-20 rounded-full border border-white/10 bg-black/20 text-white hover:bg-white/8 hover:text-white sm:left-8 sm:top-8"><ArrowLeft /></Button>
-      <div className="relative z-10 w-full max-w-[460px]">
-        <div className="mb-7 flex justify-center"><Brand /></div>
+      <div className="auth-stage">
+        <div className="auth-brand"><Brand /></div>
         <div className="neon-frame rounded-[28px] bg-[#0b0b0d]/94 p-1 shadow-[0_30px_100px_rgba(0,0,0,.6)] backdrop-blur-2xl">
-          <div className="rounded-[25px] border border-white/8 bg-[#0b0b0d] p-6 sm:p-8">
+          <div className="rounded-[25px] border border-white/8 bg-[#0b0b0d] p-5 sm:p-8">
             <Tabs value={mode} onValueChange={(value) => { setMode(value as "signup" | "login"); setStatus("idle"); setError("") }}>
-              <TabsList className="grid h-11 w-full grid-cols-2 rounded-[14px] border border-white/8 bg-white/[0.035] p-1">
-                <TabsTrigger value="signup" className="rounded-[10px] data-[state=active]:bg-white data-[state=active]:text-black">Создать аккаунт</TabsTrigger>
-                <TabsTrigger value="login" className="rounded-[10px] data-[state=active]:bg-white data-[state=active]:text-black">Войти</TabsTrigger>
+              <TabsList className="grid h-12 w-full grid-cols-2 gap-3 bg-transparent p-0">
+                <TabsTrigger value="signup" className="rounded-[12px] border border-white/10 bg-transparent data-[state=active]:border-white data-[state=active]:bg-white data-[state=active]:text-black">Создать аккаунт</TabsTrigger>
+                <TabsTrigger value="login" className="rounded-[12px] border border-white/10 bg-transparent data-[state=active]:border-white data-[state=active]:bg-white data-[state=active]:text-black">Войти</TabsTrigger>
               </TabsList>
               {(["signup", "login"] as const).map((tab) => (
                 <TabsContent key={tab} value={tab} className="mt-7">
@@ -340,8 +343,8 @@ function AuthScreen({ initialMode, onBack, onComplete, reducedMotion }: { initia
                   <form onSubmit={submit} className={status === "error" ? "auth-form auth-form-error" : "auth-form"}>
                     <label className="field-label" htmlFor={`${tab}-username`}>Юзернейм</label>
                     <div className="auth-input-wrap"><AtSign className="size-4 text-white/35" /><Input id={`${tab}-username`} value={username} onChange={(event) => { setUsername(event.target.value.replace(/\s/g, "")); resetStatus() }} autoComplete="username" spellCheck={false} placeholder="yourname" className="h-auto border-0 bg-transparent p-0 text-base shadow-none placeholder:text-white/22 focus-visible:ring-0" /></div>
-                    <div className="mt-5 flex items-center justify-between"><label className="field-label" htmlFor={`${tab}-password`}>Пароль</label><span className="text-xs text-white/30">Минимум 12 символов</span></div>
-                    <div className="auth-input-wrap mt-2"><LockKeyhole className="size-4 text-white/35" /><Input id={`${tab}-password`} value={password} onChange={(event) => { setPassword(event.target.value); resetStatus() }} type={showPassword ? "text" : "password"} autoComplete={tab === "signup" ? "new-password" : "current-password"} placeholder="••••••••••••" className="h-auto border-0 bg-transparent p-0 text-base shadow-none placeholder:text-white/22 focus-visible:ring-0" /><button type="button" onClick={() => setShowPassword((value) => !value)} className="rounded-md px-2 py-1 text-xs text-white/42 transition hover:bg-white/7 hover:text-white">{showPassword ? "Скрыть" : "Показать"}</button></div>
+                    <div className="mt-5 flex items-center justify-between"><label className="field-label" htmlFor={`${tab}-password`}>Пароль</label><span className="text-xs text-white/30">Минимум 5 символов</span></div>
+                    <div className="auth-input-wrap mt-2"><LockKeyhole className="size-4 text-white/35" /><Input id={`${tab}-password`} value={password} onChange={(event) => { setPassword(event.target.value); resetStatus() }} type={showPassword ? "text" : "password"} autoComplete={tab === "signup" ? "new-password" : "current-password"} placeholder="•••••" className="h-auto border-0 bg-transparent p-0 text-base shadow-none placeholder:text-white/22 focus-visible:ring-0" /><button type="button" onClick={() => setShowPassword((value) => !value)} className="grid size-9 shrink-0 place-items-center rounded-full text-white/42 transition hover:bg-white/7 hover:text-white" aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}>{showPassword ? <EyeOff className="size-[18px]" /> : <Eye className="size-[18px]" />}</button></div>
                     <PasswordDeck strength={strength} status={status} reducedMotion={reducedMotion} />
                     <div aria-live="polite" className="min-h-7 pt-1 text-sm">{error ? <p className="text-rose-300">{error}</p> : <p className="text-white/32">Можно использовать парольную фразу.</p>}</div>
                     <Button disabled={status === "checking" || status === "success"} className="mt-3 h-12 w-full rounded-[14px] bg-white text-base text-black hover:bg-white/88">
@@ -408,12 +411,16 @@ function Messenger({ onSignOut }: { onSignOut: () => void }) {
   const [recording, setRecording] = useState(false)
   const [recordSeconds, setRecordSeconds] = useState(0)
   const [videoOpen, setVideoOpen] = useState(false)
-  const [avatarOpen, setAvatarOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [chatInfoOpen, setChatInfoOpen] = useState(false)
+  const [profile, setProfile] = useState<Profile>({ name: "Мой профиль", bio: "В сети", initials: "FG", imageUrl: "" })
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timerRef = useRef<number | null>(null)
   const recordSecondsRef = useRef(0)
   const shouldSendVoiceRef = useRef(true)
+  const attachmentRef = useRef<HTMLInputElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
 
   const activeChat = chats.find((chat) => chat.id === activeId) ?? chats[0]
   const filteredChats = chats.filter((chat) => `${chat.name} ${chat.username}`.toLowerCase().includes(query.toLowerCase()))
@@ -424,6 +431,13 @@ function Messenger({ onSignOut }: { onSignOut: () => void }) {
   }, [activeId])
 
   const sendText = (event: FormEvent) => { event.preventDefault(); const body = draft.trim(); if (!body) return; pushMessage({ sender: "me", kind: "text", body }); setDraft("") }
+
+  const attachFile = (file?: File) => {
+    if (!file) return
+    if (file.size > 25 * 1024 * 1024) { toast.error("Файл слишком большой", { description: "Для прототипа доступно до 25 МБ." }); return }
+    pushMessage({ sender: "me", kind: "file", mediaUrl: URL.createObjectURL(file), fileName: file.name, fileSize: file.size, fileType: file.type })
+    toast.success("Файл добавлен в чат")
+  }
 
   const startVoice = async () => {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") { toast.error("Этот браузер не поддерживает запись голосовых"); return }
@@ -501,30 +515,31 @@ function Messenger({ onSignOut }: { onSignOut: () => void }) {
         <nav className="nav-rail">
           <Brand compact />
           <div className="mt-7 flex flex-1 flex-col items-center gap-2"><RailButton label="Чаты" active icon={MessageCircle} /><RailButton label="Люди" icon={UsersRound} /><RailButton label="Уведомления" icon={Bell} /></div>
-          <RailButton label="Настройки" icon={Settings} onClick={() => setAvatarOpen(true)} /><button onClick={onSignOut} className="avatar-mini mt-3" aria-label="Выйти из аккаунта">FG</button>
+          <RailButton label="Профиль" icon={Settings} onClick={() => setProfileOpen(true)} /><button onClick={onSignOut} className="avatar-mini mt-3" aria-label="Выйти из аккаунта">FG</button>
         </nav>
         <aside className={mobileChatOpen ? "chat-list mobile-hidden" : "chat-list"}>
-          <div className="flex items-center justify-between px-5 pb-4 pt-5"><div><p className="eyebrow">Favourite Gram</p><h1 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">Сообщения</h1></div><Button size="icon" variant="outline" className="rounded-full border-white/9 bg-white/[0.025] text-white hover:bg-white/8 hover:text-white" aria-label="Новый чат"><Plus /></Button></div>
-          <div className="px-4 pb-3"><div className="search-field"><Search className="size-4 text-white/30" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти по юзернейму" className="h-auto border-0 bg-transparent p-0 text-sm shadow-none placeholder:text-white/27 focus-visible:ring-0" />{query && <button onClick={() => setQuery("")} aria-label="Очистить поиск"><X className="size-4 text-white/35" /></button>}</div></div>
+          <div className="flex items-center justify-between gap-3 px-5 pb-4 pt-5"><div><p className="eyebrow">Favourite Gram</p><h1 className="mt-1 text-2xl font-semibold tracking-[-0.04em]">Сообщения</h1></div><div className="flex items-center gap-2"><button onClick={() => setProfileOpen(true)} className="rounded-full" aria-label="Открыть мой профиль"><Avatar initials={profile.initials} hue="from-stone-500 to-zinc-800" imageUrl={profile.imageUrl} small /></button><Button size="icon" variant="outline" onClick={() => { setQuery(""); window.requestAnimationFrame(() => searchRef.current?.focus()) }} className="rounded-full border-white/9 bg-transparent text-white hover:bg-white/8 hover:text-white" aria-label="Новый чат"><Plus /></Button></div></div>
+          <div className="px-4 pb-3"><div className="search-field"><Search className="size-4 text-white/30" /><Input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти по юзернейму" className="h-auto border-0 bg-transparent p-0 text-sm shadow-none placeholder:text-white/27 focus-visible:ring-0" />{query && <button onClick={() => setQuery("")} aria-label="Очистить поиск"><X className="size-4 text-white/35" /></button>}</div></div>
           <div className="scrollbar-none flex-1 overflow-y-auto px-2 pb-4">
             <AnimatePresence initial={false}>{filteredPeople.map((person) => (
               <motion.button key={person.username} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} onClick={() => startChat(person)} className="person-result"><Avatar initials={person.initials} hue={person.hue} /><span className="min-w-0 flex-1 text-left"><strong className="block truncate text-sm font-medium">{person.name}</strong><span className="mt-1 block text-xs text-white/35">{person.username}</span></span><span className="rounded-full border border-white/9 px-3 py-1.5 text-xs text-white/56">Написать</span></motion.button>
             ))}</AnimatePresence>
             {filteredChats.map((chat) => {
               const last = chat.messages.at(-1)
-              return <motion.button layout key={chat.id} onClick={() => { setActiveId(chat.id); setMobileChatOpen(true) }} className={chat.id === activeId ? "chat-row chat-row-active" : "chat-row"}><div className="relative"><Avatar initials={chat.initials} hue={chat.hue} /><span className={chat.online ? "presence presence-online" : "presence"} /></div><span className="min-w-0 flex-1 text-left"><span className="flex items-center justify-between gap-2"><strong className="truncate text-[15px] font-medium">{chat.name}</strong><small className="text-[11px] text-white/25">{last?.time}</small></span><span className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-sm text-white/38">{last?.kind === "voice" ? "Голосовое сообщение" : last?.kind === "video" ? "Кружочек" : last?.body || "Сообщений пока нет"}</span>{chat.unread > 0 && <span className="grid size-5 shrink-0 place-items-center rounded-full bg-white text-[10px] font-semibold text-black">{chat.unread}</span>}</span></span></motion.button>
+              return <motion.button key={chat.id} onClick={() => { setActiveId(chat.id); setMobileChatOpen(true) }} className={chat.id === activeId ? "chat-row chat-row-active" : "chat-row"}><div className="relative"><Avatar initials={chat.initials} hue={chat.hue} /><span className={chat.online ? "presence presence-online" : "presence"} /></div><span className="min-w-0 flex-1 text-left"><span className="flex items-center justify-between gap-2"><strong className="truncate text-[15px] font-medium">{chat.name}</strong><small className="text-[11px] text-white/25">{last?.time}</small></span><span className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-sm text-white/38">{last?.kind === "voice" ? "Голосовое сообщение" : last?.kind === "video" ? "Кружочек" : last?.kind === "file" ? `Файл: ${last.fileName ?? "вложение"}` : last?.body || "Сообщений пока нет"}</span>{chat.unread > 0 && <span className="grid size-5 shrink-0 place-items-center rounded-full bg-white text-[10px] font-semibold text-black">{chat.unread}</span>}</span></span></motion.button>
             })}
           </div>
         </aside>
         <section className={mobileChatOpen ? "conversation conversation-open" : "conversation"}>
-          <header className="conversation-header"><Button variant="ghost" size="icon" onClick={() => setMobileChatOpen(false)} className="mobile-back rounded-full text-white hover:bg-white/7 hover:text-white" aria-label="Назад к чатам"><ArrowLeft /></Button><Avatar initials={activeChat.initials} hue={activeChat.hue} small /><div className="min-w-0 flex-1"><h2 className="truncate font-medium">{activeChat.name}</h2><p className="mt-0.5 text-xs text-white/35">{activeChat.online ? "в сети" : activeChat.username}</p></div><Button variant="ghost" size="icon" className="rounded-full text-white/60 hover:bg-white/7 hover:text-white" aria-label="Информация о чате"><Info /></Button><Button variant="ghost" size="icon" className="rounded-full text-white/60 hover:bg-white/7 hover:text-white" aria-label="Действия"><MoreHorizontal /></Button></header>
+          <header className="conversation-header"><Button variant="ghost" size="icon" onClick={() => setMobileChatOpen(false)} className="mobile-back rounded-full text-white hover:bg-white/7 hover:text-white" aria-label="Назад к чатам"><ArrowLeft /></Button><button onClick={() => setChatInfoOpen(true)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left" aria-label="Открыть профиль собеседника"><Avatar initials={activeChat.initials} hue={activeChat.hue} small /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{activeChat.name}</span><span className="mt-0.5 block text-xs text-white/35">{activeChat.online ? "в сети" : activeChat.username}</span></span></button></header>
           <MessageArea chat={activeChat} />
           <div className="composer-wrap"><AnimatePresence>{recording && <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="recording-bar"><span className="recording-dot" /><strong>{formatDuration(recordSeconds)}</strong><span className="text-white/38">Идёт запись</span><button onClick={() => stopVoice(false)} className="ml-auto rounded-full px-3 py-1.5 text-sm text-white/46 hover:bg-white/7 hover:text-white">Отменить</button><Button size="icon" onClick={() => stopVoice(true)} className="rounded-full bg-white text-black hover:bg-white/88"><Send /></Button></motion.div>}</AnimatePresence>
-            {!recording && <form onSubmit={sendText} className="composer"><Button type="button" variant="ghost" size="icon" className="rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Прикрепить файл" onClick={() => setAvatarOpen(true)}><Paperclip /></Button><Input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Сообщение" className="h-auto flex-1 border-0 bg-transparent px-1 text-base shadow-none placeholder:text-white/25 focus-visible:ring-0" /><Button type="button" variant="ghost" size="icon" className="rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Записать кружочек" onClick={() => setVideoOpen(true)}><Camera /></Button>{draft.trim() ? <Button size="icon" className="rounded-full bg-white text-black hover:bg-white/88" aria-label="Отправить"><Send /></Button> : <Button type="button" size="icon" className="rounded-full bg-white text-black hover:bg-white/88" aria-label="Записать голосовое" onClick={startVoice}><Mic /></Button>}</form>}
+            {!recording && <><input ref={attachmentRef} type="file" className="hidden" onChange={(event) => { attachFile(event.target.files?.[0]); event.currentTarget.value = "" }} /><form onSubmit={sendText} className="composer"><Button type="button" variant="ghost" size="icon" className="rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Прикрепить файл" onClick={() => attachmentRef.current?.click()}><Paperclip /></Button><Input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Сообщение" className="h-auto flex-1 border-0 bg-transparent px-1 text-base shadow-none placeholder:text-white/25 focus-visible:ring-0" /><Button type="button" variant="ghost" size="icon" className="rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Записать кружочек" onClick={() => setVideoOpen(true)}><Camera /></Button>{draft.trim() ? <Button size="icon" className="rounded-full bg-white text-black hover:bg-white/88" aria-label="Отправить"><Send /></Button> : <Button type="button" size="icon" className="rounded-full bg-white text-black hover:bg-white/88" aria-label="Записать голосовое" onClick={startVoice}><Mic /></Button>}</form></>}
           </div>
         </section>
         <VideoRecorderDialog open={videoOpen} onOpenChange={setVideoOpen} onSend={(url, duration) => pushMessage({ sender: "me", kind: "video", mediaUrl: url, duration })} />
-        <AvatarUploadDialog open={avatarOpen} onOpenChange={setAvatarOpen} />
+        {profileOpen && <ProfileDialog open onOpenChange={setProfileOpen} profile={profile} onSave={setProfile} />}
+        <ChatInfoDialog open={chatInfoOpen} onOpenChange={setChatInfoOpen} chat={activeChat} />
       </TooltipProvider>
     </motion.main>
   )
@@ -534,8 +549,8 @@ function RailButton({ label, icon: Icon, active = false, onClick }: { label: str
   return <Tooltip><TooltipTrigger asChild><button onClick={onClick} className={active ? "rail-button rail-button-active" : "rail-button"} aria-label={label}><Icon className="size-[19px]" /></button></TooltipTrigger><TooltipContent side="right" sideOffset={8}>{label}</TooltipContent></Tooltip>
 }
 
-function Avatar({ initials, hue, small = false }: { initials: string; hue: string; small?: boolean }) {
-  return <span className={`${small ? "size-10" : "size-12"} grid shrink-0 place-items-center rounded-full bg-gradient-to-br ${hue} text-xs font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,.2)]`}>{initials}</span>
+function Avatar({ initials, hue, small = false, imageUrl = "" }: { initials: string; hue: string; small?: boolean; imageUrl?: string }) {
+  return <span className={`${small ? "size-10" : "size-12"} grid shrink-0 place-items-center overflow-hidden rounded-full bg-gradient-to-br ${hue} text-xs font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,.2)]`}>{imageUrl ? <img src={imageUrl} alt="" className="h-full w-full object-cover" /> : initials}</span>
 }
 
 function MessageArea({ chat }: { chat: Chat }) {
@@ -546,7 +561,13 @@ function MessageArea({ chat }: { chat: Chat }) {
 
 function MessageBubble({ message, avatar }: { message: Message; avatar: Chat }) {
   const mine = message.sender === "me"
-  return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} small />}<div className={mine ? "bubble bubble-me" : "bubble"}>{message.kind === "text" && <p>{message.body}</p>}{message.kind === "voice" && <VoiceBubble duration={message.duration ?? 1} mediaUrl={message.mediaUrl} mine={mine} />}{message.kind === "video" && <VideoCircle mediaUrl={message.mediaUrl} duration={message.duration ?? 0} />}<span className={mine ? "message-time text-black/42" : "message-time text-white/30"}>{message.time}{mine && <Check className="size-3" />}</span></div></motion.div>
+  const bubbleClass = `${mine ? "bubble bubble-me" : "bubble"}${message.kind === "text" ? " bubble-text" : ""}`
+  return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} small />}<div className={bubbleClass}>{message.kind === "text" && <p>{message.body}</p>}{message.kind === "voice" && <VoiceBubble duration={message.duration ?? 1} mediaUrl={message.mediaUrl} mine={mine} />}{message.kind === "video" && <VideoCircle mediaUrl={message.mediaUrl} duration={message.duration ?? 0} />}{message.kind === "file" && <FileBubble message={message} mine={mine} />}<span className={mine ? "message-time text-black/42" : "message-time text-white/30"}>{message.time}{mine && <Check className="size-3" />}</span></div></motion.div>
+}
+
+function FileBubble({ message, mine }: { message: Message; mine: boolean }) {
+  const size = formatFileSize(message.fileSize ?? 0)
+  return <a href={message.mediaUrl} download={message.fileName} className="file-bubble" aria-label={`Скачать ${message.fileName ?? "файл"}`}><span className="file-bubble-icon"><FileText className="size-5" /></span><span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium">{message.fileName ?? "Файл"}</strong><small className={mine ? "mt-1 block text-black/45" : "mt-1 block text-white/38"}>{size}</small></span><Download className="size-4 shrink-0 opacity-55" /></a>
 }
 
 function VoiceBubble({ duration, mediaUrl, mine }: { duration: number; mediaUrl?: string; mine: boolean }) {
@@ -598,16 +619,38 @@ function VideoRecorderDialog({ open, onOpenChange, onSend }: { open: boolean; on
   return <Dialog open={open} onOpenChange={(value) => { if (!value) close(); else onOpenChange(true) }}><DialogContent className="max-w-[520px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Кружочек</DialogTitle><DialogDescription className="text-white/42">До 60 секунд. Можно переснять перед отправкой.</DialogDescription></DialogHeader><div className="relative mx-auto aspect-square w-[min(76vw,340px)] overflow-hidden rounded-full border border-white/14 bg-black shadow-[0_0_0_8px_rgba(255,255,255,.025)]"><video ref={previewRef} autoPlay muted playsInline className="h-full w-full object-cover" /><div className="pointer-events-none absolute inset-0 rounded-full border border-white/18" />{(recording || resultUrl) && <span className="absolute bottom-5 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-3 py-1.5 text-sm tabular-nums">{formatDuration(seconds)}</span>}</div><DialogFooter className="items-center justify-center sm:justify-center">{resultUrl ? <><Button variant="outline" className="border-white/10 bg-white/4 text-white hover:bg-white/8 hover:text-white" onClick={() => { setResultUrl(""); setSeconds(0); if (previewRef.current) { previewRef.current.src = ""; previewRef.current.srcObject = streamRef.current } }}>Переснять</Button><Button className="bg-white text-black hover:bg-white/88" onClick={() => { onSend(resultUrl, seconds); close() }}><Send className="mr-2 size-4" />Отправить</Button></> : recording ? <Button className="size-14 rounded-full bg-white text-black hover:bg-white/88" onClick={stop} aria-label="Остановить запись"><Square className="size-5 fill-current" /></Button> : <Button className="size-14 rounded-full bg-white text-black hover:bg-white/88" onClick={record} aria-label="Начать запись"><Circle className="size-6 fill-current" /></Button>}</DialogFooter></DialogContent></Dialog>
 }
 
-function AvatarUploadDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [imageUrl, setImageUrl] = useState("")
-  const [scale, setScale] = useState(1)
+function ProfileDialog({ open, onOpenChange, profile, onSave }: { open: boolean; onOpenChange: (open: boolean) => void; profile: Profile; onSave: (profile: Profile) => void }) {
+  const [imageUrl, setImageUrl] = useState(profile.imageUrl)
+  const [name, setName] = useState(profile.name)
+  const [bio, setBio] = useState(profile.bio)
   const fileRef = useRef<HTMLInputElement>(null)
-  const choose = (file?: File) => { if (!file) return; if (!file.type.startsWith("image/")) { toast.error("Выберите изображение"); return } setImageUrl(URL.createObjectURL(file)) }
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[560px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Фото профиля</DialogTitle><DialogDescription className="text-white/42">Выберите квадратную область. Фото можно заменить позже.</DialogDescription></DialogHeader><input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(event) => choose(event.target.files?.[0])} /><div onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); choose(event.dataTransfer.files?.[0]) }} className="upload-panel"><div className="upload-circle">{imageUrl ? <img src={imageUrl} alt="Предпросмотр" className="h-full w-full object-cover" style={{ transform: `scale(${scale})` }} /> : <div className="flex h-full flex-col items-center justify-center gap-3 text-center"><span className="grid size-12 place-items-center rounded-full border border-dashed border-white/20"><ImagePlus className="size-5 text-white/55" /></span><p className="text-sm text-white/52">Перетащите изображение</p></div>}</div><p className="mt-5 text-center text-sm text-white/36">PNG, JPG или WebP</p><Button variant="outline" className="mt-4 rounded-xl border-white/10 bg-black/25 text-white hover:bg-white/8 hover:text-white" onClick={() => fileRef.current?.click()}>Выбрать файл</Button></div>{imageUrl && <label className="flex items-center gap-4 text-sm text-white/45"><span>Масштаб</span><input type="range" min="1" max="2" step="0.01" value={scale} onChange={(event) => setScale(Number(event.target.value))} className="accent-white flex-1" /></label>}<DialogFooter><Button variant="outline" className="border-white/10 bg-white/4 text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Отмена</Button><Button className="bg-white text-black hover:bg-white/88" onClick={() => { onOpenChange(false); toast.success("Фото сохранено") }} disabled={!imageUrl}>Сохранить</Button></DialogFooter></DialogContent></Dialog>
+  const choose = (file?: File) => {
+    if (!file) return
+    if (!file.type.startsWith("image/")) { toast.error("Выберите изображение"); return }
+    setImageUrl(URL.createObjectURL(file))
+  }
+  const save = () => {
+    const cleanName = name.trim() || "Мой профиль"
+    const initials = cleanName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "FG"
+    onSave({ name: cleanName, bio: bio.trim(), initials, imageUrl })
+    onOpenChange(false)
+    toast.success("Профиль сохранён")
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[520px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Мой профиль</DialogTitle><DialogDescription className="text-white/42">Аватар, отображаемое имя и короткое описание.</DialogDescription></DialogHeader><input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(event) => choose(event.target.files?.[0])} /><button type="button" onClick={() => fileRef.current?.click()} className="mx-auto grid size-28 place-items-center overflow-hidden rounded-full border border-dashed border-white/20 bg-white/[0.035]" aria-label="Выбрать фото профиля">{imageUrl ? <img src={imageUrl} alt="Предпросмотр аватара" className="h-full w-full object-cover" /> : <ImagePlus className="size-7 text-white/55" />}</button><div className="space-y-4"><label className="block"><span className="field-label">Имя</span><div className="auth-input-wrap"><Input value={name} maxLength={48} onChange={(event) => setName(event.target.value)} className="h-auto border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0" /></div></label><label className="block"><span className="field-label">О себе</span><div className="auth-input-wrap"><Input value={bio} maxLength={96} onChange={(event) => setBio(event.target.value)} placeholder="Пара слов о себе" className="h-auto border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0" /></div></label></div><DialogFooter><Button variant="outline" className="border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Отмена</Button><Button className="bg-white text-black hover:bg-white/88" onClick={save}>Сохранить</Button></DialogFooter></DialogContent></Dialog>
+}
+
+function ChatInfoDialog({ open, onOpenChange, chat }: { open: boolean; onOpenChange: (open: boolean) => void; chat: Chat }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[420px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-center text-white"><div className="mx-auto"><Avatar initials={chat.initials} hue={chat.hue} /></div><DialogHeader><DialogTitle className="text-center text-2xl tracking-[-0.04em]">{chat.name}</DialogTitle><DialogDescription className="text-center text-white/42">{chat.username} · {chat.online ? "сейчас в сети" : "не в сети"}</DialogDescription></DialogHeader><Button variant="outline" className="w-full border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Вернуться в чат</Button></DialogContent></Dialog>
 }
 
 function formatDuration(seconds: number) {
   const minutes = Math.floor(seconds / 60)
   const rest = Math.floor(seconds % 60)
   return `${minutes}:${String(rest).padStart(2, "0")}`
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`
+  return `${(bytes / 1024 / 1024).toFixed(1)} МБ`
 }
