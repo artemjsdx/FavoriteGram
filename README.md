@@ -34,9 +34,13 @@ pnpm dev
 pnpm build
 ```
 
+Команда создаёт полностью статический сайт в каталоге `out/`. Для публикации
+достаточно отдать содержимое `out/` любому статическому хостингу. Cloudflare,
+Wrangler и инфраструктура ChatGPT Sites проекту не нужны.
+
 ## Стек
 
-- React 19, TypeScript, Next/Vinext;
+- React 19, TypeScript, Next.js;
 - Tailwind CSS и shadcn/ui;
 - Framer Motion;
 - Paper Design shaders;
