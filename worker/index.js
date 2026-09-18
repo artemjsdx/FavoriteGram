@@ -516,7 +516,7 @@ function serveStatic(url) {
   return new Response(decodeBase64(entry.body), { status: candidates.some((candidate) => STATIC_ASSETS[candidate]) ? 200 : 404, headers });
 }
 
-export default {
+const worker = {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
@@ -536,3 +536,5 @@ export default {
     }
   },
 };
+
+export default worker;
