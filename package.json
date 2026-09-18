@@ -7,10 +7,10 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/build-sites.mjs",
     "start": "node server/index.mjs",
     "start:wispbyte": "node server/index.mjs",
-    "test": "node --test test/backend.test.mjs",
+    "test": "node --test test/backend.test.mjs test/hosted-worker.test.mjs",
     "test:e2e": "node --test test/e2e.test.mjs",
     "lint": "eslint . --ignore-pattern .next --ignore-pattern out"
   },

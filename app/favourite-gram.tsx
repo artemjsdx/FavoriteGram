@@ -701,6 +701,20 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
     if (!backendEnabled) return
     const events = new EventSource("/api/events", { withCredentials: true })
     const typingTimers = typingTimersRef.current
+    let disposed = false
+    const refreshFromServer = async () => {
+      const result = await backendRequest<{ chats?: ServerChat[] }>("/api/chats")
+      if (disposed || !result.ok) return
+      const incoming = (result.data?.chats || []).map((chat) => mapServerChat(chat, profile.username))
+      setChats((current) => incoming.map((chat) => {
+        const existing = current.find((item) => item.serverId === chat.serverId)
+        if (!existing) return chat
+        const serverClientIds = new Set(chat.messages.map((message) => message.clientId).filter(Boolean))
+        const pending = existing.messages.filter((message) => (message.status === "sending" || message.status === "error") && !serverClientIds.has(message.clientId))
+        return { ...chat, messages: [...chat.messages, ...pending].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)) }
+      }))
+      setActiveId((current) => incoming.some((chat) => chat.id === current) ? current : incoming[0]?.id || "")
+    }
     const onServerMessage = (event: MessageEvent<string>) => {
       const payload = JSON.parse(event.data) as { conversationId: string; message: ServerMessage; chat: ServerChat }
       setChats((current) => {
@@ -742,7 +756,8 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
     events.addEventListener("presence.updated", onPresence as EventListener)
     events.addEventListener("typing.updated", onTyping as EventListener)
     events.addEventListener("chat.read", onRead as EventListener)
-    return () => { events.close(); for (const timer of typingTimers.values()) window.clearTimeout(timer); typingTimers.clear() }
+    events.addEventListener("refresh", refreshFromServer as EventListener)
+    return () => { disposed = true; events.close(); for (const timer of typingTimers.values()) window.clearTimeout(timer); typingTimers.clear() }
   }, [backendEnabled, profile.username])
 
   useEffect(() => {
