@@ -67,14 +67,6 @@ jobs:
           fi
           node scripts/prepare-cloudflare-config.mjs "$DB_ID"
 
-      - name: Ensure R2 bucket
-        if: steps.cloudflare.outputs.configured == 'true'
-        shell: bash
-        run: |
-          if ! pnpm exec wrangler r2 bucket list | grep -Fq 'favouritegram-files'; then
-            pnpm exec wrangler r2 bucket create favouritegram-files
-          fi
-
       - name: Apply D1 schema
         if: steps.cloudflare.outputs.configured == 'true'
         run: pnpm exec wrangler d1 execute favouritegram-db --remote --file=drizzle/0000_hosted_state.sql --config=.wrangler/deploy.jsonc

@@ -2,6 +2,7 @@ const STATIC_ASSETS = {};
 
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 const MAX_JSON_BYTES = 36 * 1024 * 1024;
+const FILE_CHUNK_BYTES = 1_500_000;
 const RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const authAttempts = new Map();
 
@@ -187,6 +188,39 @@ function clearSessionCookie() {
   return "fg_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0";
 }
 
+async function storeUpload(env, fileName, bytes) {
+  const statements = [];
+  for (let offset = 0, index = 0; offset < bytes.length; offset += FILE_CHUNK_BYTES, index += 1) {
+    const chunk = bytes.slice(offset, offset + FILE_CHUNK_BYTES);
+    statements.push(env.DB.prepare("INSERT INTO app_file_chunks (file_name, chunk_index, data) VALUES (?, ?, ?)").bind(fileName, index, chunk.buffer));
+  }
+  await env.DB.batch(statements);
+}
+
+async function deleteUploads(env, fileNames) {
+  if (!fileNames.length) return;
+  await env.DB.batch(fileNames.map((fileName) => env.DB.prepare("DELETE FROM app_file_chunks WHERE file_name = ?").bind(fileName)));
+}
+
+function blobBytes(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return Uint8Array.from(value);
+  return null;
+}
+
+async function loadUpload(env, fileName, size) {
+  const chunks = [];
+  const count = Math.ceil(size / FILE_CHUNK_BYTES);
+  for (let index = 0; index < count; index += 1) {
+    const row = await env.DB.prepare("SELECT data FROM app_file_chunks WHERE file_name = ? AND chunk_index = ?").bind(fileName, index).first();
+    const bytes = blobBytes(row?.data);
+    if (!bytes) return null;
+    chunks.push(bytes);
+  }
+  return new Blob(chunks);
+}
+
 function getConversationForUser(database, id, userId) {
   return database.conversations.find((conversation) => conversation.id === id && conversation.participants.includes(userId));
 }
@@ -344,7 +378,7 @@ async function handleApi(database, request, env, url) {
     database.sessions = database.sessions.filter((session) => session.userId !== user.id);
     database.uploads = database.uploads.filter((upload) => upload.userId !== user.id);
     database.users = database.users.filter((item) => item.id !== user.id).map((item) => ({ ...item, blockedUserIds: (item.blockedUserIds || []).filter((id) => id !== user.id) }));
-    return result(200, { ok: true }, { changed: true, headers: { "set-cookie": clearSessionCookie() }, afterPersist: () => Promise.all(ownedUploads.map((upload) => env.BUCKET.delete(upload.fileName))) });
+    return result(200, { ok: true }, { changed: true, headers: { "set-cookie": clearSessionCookie() }, afterPersist: () => deleteUploads(env, ownedUploads.map((upload) => upload.fileName)) });
   }
 
   const blockMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/block$/);
@@ -626,7 +660,7 @@ async function handleApi(database, request, env, url) {
     const extension = extensionByMime[match[1].toLowerCase()] || ".bin";
     const fileName = `${crypto.randomUUID()}${extension}`;
     database.uploads.push({ id: crypto.randomUUID(), userId: user.id, fileName, url: `/uploads/${fileName}`, size: bytes.length, type: match[1], createdAt: Date.now() });
-    return result(201, { url: `/uploads/${fileName}`, type: match[1], size: bytes.length }, { changed: true, afterPersist: () => env.BUCKET.put(fileName, bytes, { httpMetadata: { contentType: match[1] } }) });
+    return result(201, { url: `/uploads/${fileName}`, type: match[1], size: bytes.length }, { changed: true, afterPersist: () => storeUpload(env, fileName, bytes) });
   }
 
   if (url.pathname === "/api/events" && request.method === "GET") return { status: 200, body: null, sse: true, changed: false };
@@ -644,12 +678,10 @@ async function serveUpload(request, env, url) {
   const inProfile = database.users.some((item) => item.avatarUrl === path);
   const inConversation = database.messages.some((message) => message.mediaUrl === path && database.conversations.some((conversation) => conversation.id === message.conversationId && conversation.participants.includes(user.id)));
   if (!inProfile && !inConversation && upload?.userId !== user.id) return json(404, { error: "File not found" });
-  const object = await env.BUCKET.get(name);
+  if (!upload) return json(404, { error: "File not found" });
+  const object = await loadUpload(env, name, Number(upload.size || 0));
   if (!object) return json(404, { error: "File not found" });
-  const headers = new Headers({ "cache-control": "private, max-age=300" });
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  return new Response(object.body, { headers });
+  return new Response(object, { headers: { "cache-control": "private, max-age=300", "content-length": String(upload.size), "content-type": upload.type || "application/octet-stream" } });
 }
 
 function decodeBase64(value) {

@@ -8,6 +8,11 @@ class MockD1Statement {
   bind(...values) { this.values = values; return this; }
   async first() {
     if (this.sql.startsWith("SELECT data, updated_at FROM app_state")) return this.database.row ? { ...this.database.row } : null;
+    if (this.sql.startsWith("SELECT data FROM app_file_chunks")) {
+      const [fileName, chunkIndex] = this.values;
+      const data = this.database.files.get(fileName)?.get(chunkIndex);
+      return data ? { data } : null;
+    }
     throw new Error(`Unsupported first(): ${this.sql}`);
   }
   async run() {
@@ -21,24 +26,26 @@ class MockD1Statement {
       this.database.row = { data, updated_at: nextRevision };
       return { meta: { changes: 1 } };
     }
+    if (this.sql.startsWith("INSERT INTO app_file_chunks")) {
+      const [fileName, chunkIndex, data] = this.values;
+      const chunks = this.database.files.get(fileName) || new Map();
+      chunks.set(chunkIndex, data);
+      this.database.files.set(fileName, chunks);
+      return { meta: { changes: 1 } };
+    }
+    if (this.sql.startsWith("DELETE FROM app_file_chunks")) {
+      const deleted = this.database.files.delete(this.values[0]);
+      return { meta: { changes: deleted ? 1 : 0 } };
+    }
     throw new Error(`Unsupported run(): ${this.sql}`);
   }
 }
 
 class MockD1 {
   row = null;
+  files = new Map();
   prepare(sql) { return new MockD1Statement(this, sql); }
-}
-
-class MockR2 {
-  objects = new Map();
-  async put(key, value, options = {}) { this.objects.set(key, { value: new Uint8Array(value), type: options.httpMetadata?.contentType || "application/octet-stream" }); }
-  async delete(key) { this.objects.delete(key); }
-  async get(key) {
-    const item = this.objects.get(key);
-    if (!item) return null;
-    return { body: item.value, httpEtag: `\"${key}\"`, writeHttpMetadata(headers) { headers.set("content-type", item.type); } };
-  }
+  async batch(statements) { return Promise.all(statements.map((statement) => statement.run())); }
 }
 
 let nextIp = 10;
@@ -63,8 +70,8 @@ function session(env) {
   };
 }
 
-test("Sites Worker persists accounts, chats, polling events and R2 uploads", async () => {
-  const env = { DB: new MockD1(), BUCKET: new MockR2() };
+test("Sites Worker persists accounts, chats, polling events and D1 uploads", async () => {
+  const env = { DB: new MockD1() };
   const alice = session(env);
   const bob = session(env);
 
@@ -110,7 +117,7 @@ test("Sites Worker persists accounts, chats, polling events and R2 uploads", asy
 
   const uploaded = await alice.request("/api/uploads", { method: "POST", body: JSON.stringify({ name: "note.txt", dataUrl: "data:text/plain;base64,0KLQtdGB0YI=" }) });
   assert.equal(uploaded.response.status, 201);
-  assert.equal(env.BUCKET.objects.size, 1);
+  assert.equal(env.DB.files.size, 1);
   const file = await alice.request(uploaded.data.url);
   assert.equal(file.response.status, 200);
   assert.equal(file.data, "Тест");
@@ -151,7 +158,7 @@ test("Sites Worker persists accounts, chats, polling events and R2 uploads", asy
 });
 
 test("Sites Worker supports groups, privacy and WebRTC signaling state", async () => {
-  const env = { DB: new MockD1(), BUCKET: new MockR2() };
+  const env = { DB: new MockD1() };
   const owner = session(env);
   const a = session(env);
   const b = session(env);

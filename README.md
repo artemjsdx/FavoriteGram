@@ -28,7 +28,7 @@
 - медиагалерея, файловая вкладка, seek/speed для голосовых и прогресс загрузки;
 - настройки приватности, блокировки, жалобы, управление сессиями и удаление аккаунта;
 - PWA-установка, offline-экран и системные уведомления;
-- два production backend: Node.js с JSON/диском и Cloudflare Worker с D1/R2.
+- два production backend: Node.js с JSON/диском и Cloudflare Worker с D1.
 
 ## Текущий статус
 
@@ -37,8 +37,9 @@
 - на обычном статическом хостинге без API используется демонстрационный локальный режим браузера;
 - при запуске через `server/index.mjs` включаются серверные аккаунты, сессии,
   загрузки, синхронизация профилей и realtime-события.
-- при публикации в ChatGPT Sites используется `worker/index.js`: состояние хранится
-  в D1, вложения — в R2, обновления подхватываются коротким polling/SSE reconnect.
+- при публикации Worker используется `worker/index.js`: состояние и
+  разбитые на части вложения хранятся в D1, обновления подхватываются коротким
+  polling/SSE reconnect.
 
 Встроенная JSON-база рассчитана на один экземпляр приложения и первый
 публичный прототип. Для горизонтального масштабирования её нужно заменить на
@@ -89,13 +90,13 @@ pnpm start:wispbyte
 ## Cloudflare Workers
 
 Ветка `web-source` содержит автоматический production-деплой в Cloudflare.
-Workflow сам создаёт D1-базу `favouritegram-db`, R2-бакет
-`favouritegram-files`, применяет схему и публикует Worker на `workers.dev`.
+Workflow сам создаёт D1-базу `favouritegram-db`, применяет схему и публикует
+Worker на `workers.dev`. Платёжный профиль и R2 для этого не нужны.
 
 В GitHub откройте **Settings → Secrets and variables → Actions** и добавьте:
 
 - `CLOUDFLARE_API_TOKEN` — Cloudflare API token с правами Workers Scripts Edit,
-  D1 Edit, Workers R2 Storage Edit и Account Settings Read;
+  D1 Edit и Account Settings Read;
 - `CLOUDFLARE_ACCOUNT_ID` — Account ID из Cloudflare Dashboard.
 
 После этого запустите **Actions → Deploy to Cloudflare → Run workflow**.
