@@ -305,13 +305,13 @@ export function FavouriteGram() {
     setScreen("messenger")
   }
 
-  const signOut = () => {
+  const signOut = useCallback(() => {
     void backendRequest("/api/auth/logout", { method: "POST" })
     window.localStorage.removeItem(SESSION_KEY)
     window.localStorage.removeItem(BACKEND_KEY)
     setSessionUsername("")
     setScreen("landing")
-  }
+  }, [])
 
   return (
     <div className="min-h-svh bg-background text-foreground selection:bg-white selection:text-black">
@@ -775,12 +775,15 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
         mediaUrl = uploaded.data.url
       } catch { markFailed(); toast.error("Не удалось загрузить вложение"); return }
     }
-    const sent = await backendRequest<{ error?: string }>(`/api/chats/${serverId}/messages`, { method: "POST", body: JSON.stringify({ ...message, mediaUrl }) })
+    const sent = await backendRequest<{ message?: ServerMessage; error?: string }>(`/api/chats/${serverId}/messages`, { method: "POST", body: JSON.stringify({ ...message, mediaUrl }) })
     if (!sent.ok) {
       markFailed()
       toast.error(sent.data?.error || "Сообщение не доставлено")
+    } else if (sent.data?.message) {
+      const delivered = mapServerMessage(sent.data.message, profile.username)
+      setChats((current) => current.map((item) => item.id === chat.id ? { ...item, messages: item.messages.map((candidate) => candidate.clientId === message.clientId ? delivered : candidate) } : item))
     }
-  }, [backendEnabled])
+  }, [backendEnabled, profile.username])
 
   const pushMessage = useCallback((message: Omit<Message, "id" | "time">) => {
     const chat = chats.find((item) => item.id === activeId)
