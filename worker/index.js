@@ -216,7 +216,7 @@ function serializeConversation(database, conversation, currentUserId, limit = 50
 
 async function handleApi(database, request, env, url) {
   if (!originAllowed(request, url)) return result(403, { error: "Origin is not allowed" });
-  if (url.pathname === "/api/health" && request.method === "GET") return result(200, { ok: true, service: "favourite-gram", host: "ChatGPT Sites" });
+  if (url.pathname === "/api/health" && request.method === "GET") return result(200, { ok: true, service: "favourite-gram", host: "Cloudflare Workers" });
 
   if ((url.pathname === "/api/auth/register" || url.pathname === "/api/auth/login") && request.method === "POST") {
     if (rateLimited(request)) return result(429, { error: "Слишком много попыток. Подождите минуту." });

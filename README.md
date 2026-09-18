@@ -86,6 +86,21 @@ pnpm start:wispbyte
 
 Каталог, указанный в `DATA_DIR`, должен быть постоянным между перезапусками.
 
+## Cloudflare Workers
+
+Ветка `web-source` содержит автоматический production-деплой в Cloudflare.
+Workflow сам создаёт D1-базу `favouritegram-db`, R2-бакет
+`favouritegram-files`, применяет схему и публикует Worker на `workers.dev`.
+
+В GitHub откройте **Settings → Secrets and variables → Actions** и добавьте:
+
+- `CLOUDFLARE_API_TOKEN` — Cloudflare API token с правами Workers Scripts Edit,
+  D1 Edit, Workers R2 Storage Edit и Account Settings Read;
+- `CLOUDFLARE_ACCOUNT_ID` — Account ID из Cloudflare Dashboard.
+
+После этого запустите **Actions → Deploy to Cloudflare → Run workflow**.
+Последующие изменения ветки `web-source` будут публиковаться автоматически.
+
 ## Проверка
 
 ```bash
