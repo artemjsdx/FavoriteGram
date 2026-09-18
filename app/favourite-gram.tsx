@@ -29,12 +29,16 @@ import {
   Menu,
   MessageCircle,
   Mic,
+  MoreHorizontal,
   Paperclip,
   Pause,
+  Pencil,
   Play,
   Palette,
   Search,
   Send,
+  Reply,
+  RotateCcw,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -58,6 +62,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Toaster } from "@/components/ui/sonner"
 import {
@@ -72,6 +77,7 @@ type MessageKind = "text" | "voice" | "video" | "file"
 
 type Message = {
   id: string
+  clientId?: string
   sender: "me" | "them"
   kind: MessageKind
   body?: string
@@ -81,6 +87,13 @@ type Message = {
   fileSize?: number
   fileType?: string
   time: string
+  createdAt?: number
+  editedAt?: number | null
+  deletedAt?: number | null
+  status?: "sending" | "delivered" | "read" | "error"
+  replyToId?: string | null
+  replyTo?: { id: string; kind: MessageKind; body?: string; senderName: string } | null
+  reactions?: Array<{ emoji: string; count: number; reactedByMe: boolean }>
 }
 
 type Chat = {
@@ -95,6 +108,8 @@ type Chat = {
   bio: string
   unread: number
   messages: Message[]
+  hasMore?: boolean
+  oldestMessageAt?: number | null
 }
 
 type Profile = {
@@ -178,8 +193,8 @@ const THEME_KEY = "favourite-gram.theme"
 const BACKEND_KEY = "favourite-gram.backend"
 
 type ServerUser = { username: string; name: string; bio: string; avatarUrl: string; online?: boolean }
-type ServerMessage = { id: string; sender: ServerUser; kind: MessageKind; body?: string; duration?: number; mediaUrl?: string; fileName?: string; fileSize?: number; fileType?: string; createdAt: number }
-type ServerChat = { id: string; person: ServerUser; messages: ServerMessage[]; unread: number; updatedAt: number }
+type ServerMessage = { id: string; clientId?: string; sender: ServerUser; kind: MessageKind; body?: string; duration?: number; mediaUrl?: string; fileName?: string; fileSize?: number; fileType?: string; createdAt: number; editedAt?: number | null; deletedAt?: number | null; delivery?: "delivered" | "read"; replyToId?: string | null; replyTo?: { id: string; kind: MessageKind; body?: string; senderName: string } | null; reactions?: Array<{ emoji: string; count: number; reactedByMe: boolean }> }
+type ServerChat = { id: string; person: ServerUser; messages: ServerMessage[]; unread: number; updatedAt: number; hasMore?: boolean; oldestMessageAt?: number | null }
 
 function storageKey(base: string, username: string) {
   return `${base}:${username.replace(/^@/, "").toLowerCase() || "guest"}`
@@ -211,6 +226,29 @@ function fileToDataUrl(file: Blob) {
   })
 }
 
+function mapServerMessage(message: ServerMessage, myUsername: string): Message {
+  return {
+    id: message.id,
+    clientId: message.clientId,
+    sender: message.sender.username === myUsername ? "me" : "them",
+    kind: message.kind,
+    body: message.body,
+    duration: message.duration,
+    mediaUrl: message.mediaUrl,
+    fileName: message.fileName,
+    fileSize: message.fileSize,
+    fileType: message.fileType,
+    time: new Date(message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }),
+    createdAt: message.createdAt,
+    editedAt: message.editedAt,
+    deletedAt: message.deletedAt,
+    status: message.sender.username === myUsername ? message.delivery || "delivered" : "delivered",
+    replyToId: message.replyToId,
+    replyTo: message.replyTo,
+    reactions: message.reactions || [],
+  }
+}
+
 function mapServerChat(chat: ServerChat, myUsername: string): Chat {
   return {
     id: `server-${chat.id}`,
@@ -223,18 +261,9 @@ function mapServerChat(chat: ServerChat, myUsername: string): Chat {
     online: Boolean(chat.person.online),
     bio: chat.person.bio || "Описание пока не добавлено.",
     unread: chat.unread || 0,
-    messages: chat.messages.map((message) => ({
-      id: message.id,
-      sender: message.sender.username === myUsername ? "me" as const : "them" as const,
-      kind: message.kind,
-      body: message.body,
-      duration: message.duration,
-      mediaUrl: message.mediaUrl,
-      fileName: message.fileName,
-      fileSize: message.fileSize,
-      fileType: message.fileType,
-      time: new Date(message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }),
-    })),
+    messages: chat.messages.map((message) => mapServerMessage(message, myUsername)),
+    hasMore: Boolean(chat.hasMore),
+    oldestMessageAt: chat.oldestMessageAt,
   }
 }
 
@@ -552,7 +581,7 @@ function ResetPasswordDialog({ open, onOpenChange, initialUsername, onComplete }
 function Messenger({ username, onHome, onSignOut }: { username: string; onHome: () => void; onSignOut: () => void }) {
   const [chats, setChats] = useState(chatsSeed)
   const [activeId, setActiveId] = useState(chatsSeed[0].id)
-  const [draft, setDraft] = useState("")
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [query, setQuery] = useState("")
   const [mobileChatOpen, setMobileChatOpen] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -560,6 +589,7 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   const [videoOpen, setVideoOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [securityOpen, setSecurityOpen] = useState(false)
   const [chatInfoOpen, setChatInfoOpen] = useState(false)
   const [pendingDeleteChat, setPendingDeleteChat] = useState<Chat | null>(null)
   const [theme, setTheme] = useState<AccentTheme>("sand")
@@ -568,6 +598,8 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   const [remotePeople, setRemotePeople] = useState<typeof people>([])
   const [typingChats, setTypingChats] = useState<Set<string>>(new Set())
   const [unreadOnly, setUnreadOnly] = useState(false)
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null)
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null)
   const [hydrated, setHydrated] = useState(false)
   const [profile, setProfile] = useState<Profile>({ username, name: username.replace(/^@/, "") || "Мой профиль", bio: "В сети", initials: "FG", imageUrl: "" })
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -584,6 +616,8 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
   const typingTimersRef = useRef<Map<string, number>>(new Map())
 
   const activeChat = chats.find((chat) => chat.id === activeId) ?? chats[0]
+  const draft = drafts[activeId] || ""
+  const setDraft = useCallback((value: string) => setDrafts((current) => ({ ...current, [activeId]: value })), [activeId])
   const filteredChats = chats.filter((chat) => (!unreadOnly || chat.unread > 0) && `${chat.name} ${chat.username}`.toLowerCase().includes(query.toLowerCase()))
   const localPeople = backendEnabled ? remotePeople : [...remotePeople, ...people]
   const filteredPeople = query.length >= 2 ? localPeople.filter((person) => `${person.name} ${person.username}`.toLowerCase().includes(query.toLowerCase())).filter((person, index, all) => all.findIndex((item) => item.username === person.username) === index) : []
@@ -667,19 +701,29 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
     if (!backendEnabled) return
     const events = new EventSource("/api/events", { withCredentials: true })
     const typingTimers = typingTimersRef.current
-    const onMessage = (event: MessageEvent<string>) => {
+    const onServerMessage = (event: MessageEvent<string>) => {
       const payload = JSON.parse(event.data) as { conversationId: string; message: ServerMessage; chat: ServerChat }
-      if (payload.message.sender.username === profile.username) return
       setChats((current) => {
         const existing = current.find((chat) => chat.serverId === payload.conversationId)
-        if (!existing) return [mapServerChat(payload.chat, profile.username), ...current]
-        return current.map((chat) => chat.serverId === payload.conversationId && !chat.messages.some((message) => message.id === payload.message.id) ? { ...chat, unread: chat.id === activeIdRef.current ? 0 : payload.chat.unread, messages: [...chat.messages, { id: payload.message.id, sender: "them", kind: payload.message.kind, body: payload.message.body, duration: payload.message.duration, mediaUrl: payload.message.mediaUrl, fileName: payload.message.fileName, fileSize: payload.message.fileSize, fileType: payload.message.fileType, time: new Date(payload.message.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) }] } : chat)
+        const mapped = mapServerChat(payload.chat, profile.username)
+        if (mapped.id === activeIdRef.current) mapped.unread = 0
+        if (existing) {
+          const serverClientIds = new Set(mapped.messages.map((message) => message.clientId).filter(Boolean))
+          const pending = existing.messages.filter((message) => (message.status === "sending" || message.status === "error") && !serverClientIds.has(message.clientId))
+          mapped.messages = [...mapped.messages, ...pending].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        }
+        return [mapped, ...current.filter((chat) => chat.serverId !== payload.conversationId)]
       })
       if (`server-${payload.conversationId}` === activeIdRef.current) void backendRequest(`/api/chats/${payload.conversationId}/read`, { method: "POST" })
     }
     const onProfile = (event: MessageEvent<string>) => {
       const { user } = JSON.parse(event.data) as { user: { username: string; name: string; bio: string; avatarUrl: string } }
+      if (user.username === profile.username) setProfile((current) => ({ ...current, name: user.name, bio: user.bio, imageUrl: user.avatarUrl, initials: getInitials(user.name) }))
       setChats((current) => current.map((chat) => chat.username === user.username ? { ...chat, name: user.name, initials: getInitials(user.name), imageUrl: user.avatarUrl, bio: user.bio } : chat))
+    }
+    const onRead = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as { conversationId: string }
+      setChats((current) => current.map((chat) => chat.serverId === payload.conversationId ? { ...chat, messages: chat.messages.map((message) => message.sender === "me" && message.status !== "error" ? { ...message, status: "read" } : message) } : chat))
     }
     const onPresence = (event: MessageEvent<string>) => {
       const payload = JSON.parse(event.data) as { username: string; online: boolean }
@@ -692,10 +736,12 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
       setTypingChats((current) => { const next = new Set(current); if (payload.typing) next.add(payload.conversationId); else next.delete(payload.conversationId); return next })
       if (payload.typing) typingTimers.set(payload.conversationId, window.setTimeout(() => setTypingChats((current) => { const next = new Set(current); next.delete(payload.conversationId); return next }), 3500))
     }
-    events.addEventListener("message.created", onMessage as EventListener)
+    events.addEventListener("message.created", onServerMessage as EventListener)
+    events.addEventListener("message.updated", onServerMessage as EventListener)
     events.addEventListener("profile.updated", onProfile as EventListener)
     events.addEventListener("presence.updated", onPresence as EventListener)
     events.addEventListener("typing.updated", onTyping as EventListener)
+    events.addEventListener("chat.read", onRead as EventListener)
     return () => { events.close(); for (const timer of typingTimers.values()) window.clearTimeout(timer); typingTimers.clear() }
   }, [backendEnabled, profile.username])
 
@@ -712,11 +758,12 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
 
   const sendToBackend = useCallback(async (chat: Chat, message: Omit<Message, "id" | "time">) => {
     if (!backendEnabled) return
+    const markFailed = () => setChats((current) => current.map((item) => item.id === chat.id ? { ...item, messages: item.messages.map((candidate) => candidate.clientId === message.clientId ? { ...candidate, status: "error" } : candidate) } : item))
     let serverId = chat.serverId
     if (!serverId) {
       const created = await backendRequest<{ chat?: { id: string } }>("/api/chats", { method: "POST", body: JSON.stringify({ username: chat.username }) })
       serverId = created.data?.chat?.id
-      if (!created.ok || !serverId) return
+      if (!created.ok || !serverId) { markFailed(); toast.error("Не удалось создать диалог"); return }
       setChats((current) => current.map((item) => item.id === chat.id ? { ...item, serverId } : item))
     }
     let mediaUrl = message.mediaUrl
@@ -724,35 +771,129 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
       try {
         const blob = await fetch(mediaUrl).then((response) => response.blob())
         const uploaded = await backendRequest<{ url?: string }>("/api/uploads", { method: "POST", body: JSON.stringify({ name: message.fileName || `${message.kind}.webm`, dataUrl: await fileToDataUrl(blob) }) })
-        if (!uploaded.ok || !uploaded.data?.url) { toast.error("Не удалось загрузить вложение"); return }
+        if (!uploaded.ok || !uploaded.data?.url) { markFailed(); toast.error("Не удалось загрузить вложение"); return }
         mediaUrl = uploaded.data.url
-      } catch { toast.error("Не удалось загрузить вложение"); return }
+      } catch { markFailed(); toast.error("Не удалось загрузить вложение"); return }
     }
     const sent = await backendRequest<{ error?: string }>(`/api/chats/${serverId}/messages`, { method: "POST", body: JSON.stringify({ ...message, mediaUrl }) })
-    if (!sent.ok) toast.error(sent.data?.error || "Сообщение не доставлено")
+    if (!sent.ok) {
+      markFailed()
+      toast.error(sent.data?.error || "Сообщение не доставлено")
+    }
   }, [backendEnabled])
 
   const pushMessage = useCallback((message: Omit<Message, "id" | "time">) => {
     const chat = chats.find((item) => item.id === activeId)
-    setChats((current) => current.map((item) => item.id === activeId ? { ...item, unread: 0, messages: [...item.messages, { ...message, id: crypto.randomUUID(), time: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) }] } : item))
-    if (chat) void sendToBackend(chat, message)
-  }, [activeId, chats, sendToBackend])
+    const clientId = message.clientId || crypto.randomUUID()
+    const createdAt = Date.now()
+    const localMessage = { ...message, clientId, id: clientId, status: backendEnabled ? "sending" as const : "delivered" as const, createdAt, time: new Date(createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) }
+    setChats((current) => {
+      const target = current.find((item) => item.id === activeId)
+      return target ? [{ ...target, unread: 0, messages: [...target.messages, localMessage] }, ...current.filter((item) => item.id !== activeId)] : current
+    })
+    if (chat) void sendToBackend(chat, { ...message, clientId })
+  }, [activeId, backendEnabled, chats, sendToBackend])
 
   const openChat = (id: string) => {
     const chat = chats.find((item) => item.id === id)
     setActiveId(id)
     setChats((current) => current.map((chat) => chat.id === id ? { ...chat, unread: 0 } : chat))
     setMobileChatOpen(true)
+    setReplyingTo(null)
+    setEditingMessage(null)
     if (backendEnabled && chat?.serverId) void backendRequest(`/api/chats/${chat.serverId}/read`, { method: "POST" })
   }
 
-  const sendText = (event: FormEvent) => {
+  const sendText = async (event: FormEvent) => {
     event.preventDefault()
     const body = draft.trim()
     if (!body) return
-    pushMessage({ sender: "me", kind: "text", body })
+    if (editingMessage && activeChat) {
+      const previousBody = editingMessage.body
+      setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map((message) => message.id === editingMessage.id ? { ...message, body, editedAt: Date.now() } : message) } : chat))
+      if (backendEnabled && activeChat.serverId) {
+        const saved = await backendRequest<{ error?: string }>(`/api/chats/${activeChat.serverId}/messages/${editingMessage.id}`, { method: "PATCH", body: JSON.stringify({ body }) })
+        if (!saved.ok) {
+          setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map((message) => message.id === editingMessage.id ? { ...message, body: previousBody } : message) } : chat))
+          toast.error(saved.data?.error || "Не удалось изменить сообщение")
+          return
+        }
+      }
+      setEditingMessage(null)
+    } else {
+      pushMessage({ sender: "me", kind: "text", body, replyToId: replyingTo?.id || null })
+      setReplyingTo(null)
+    }
     setDraft("")
     if (composerRef.current) composerRef.current.style.height = "auto"
+  }
+
+  const beginReply = (message: Message) => {
+    setEditingMessage(null)
+    setReplyingTo(message)
+    window.setTimeout(() => composerRef.current?.focus(), 0)
+  }
+
+  const beginEdit = (message: Message) => {
+    if (message.sender !== "me" || message.kind !== "text" || message.deletedAt) return
+    setReplyingTo(null)
+    setEditingMessage(message)
+    setDraft(message.body || "")
+    window.setTimeout(() => {
+      composerRef.current?.focus()
+      if (composerRef.current) composerRef.current.style.height = `${Math.min(composerRef.current.scrollHeight, 132)}px`
+    }, 0)
+  }
+
+  const deleteMessage = async (message: Message) => {
+    if (!activeChat || message.sender !== "me") return
+    const previous = message
+    setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map((item) => item.id === message.id ? { ...item, body: "", mediaUrl: undefined, fileName: undefined, deletedAt: Date.now() } : item) } : chat))
+    if (backendEnabled && activeChat.serverId) {
+      const removed = await backendRequest<{ error?: string }>(`/api/chats/${activeChat.serverId}/messages/${message.id}`, { method: "DELETE" })
+      if (!removed.ok) {
+        setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map((item) => item.id === message.id ? previous : item) } : chat))
+        toast.error(removed.data?.error || "Не удалось удалить сообщение")
+      }
+    }
+  }
+
+  const toggleReaction = async (message: Message, emoji: string) => {
+    if (!activeChat || message.deletedAt) return
+    const update = (item: Message) => {
+      if (item.id !== message.id) return item
+      const reactions = [...(item.reactions || [])]
+      const index = reactions.findIndex((reaction) => reaction.emoji === emoji)
+      if (index < 0) reactions.push({ emoji, count: 1, reactedByMe: true })
+      else if (reactions[index].reactedByMe) {
+        const count = reactions[index].count - 1
+        if (count <= 0) reactions.splice(index, 1)
+        else reactions[index] = { ...reactions[index], count, reactedByMe: false }
+      } else reactions[index] = { ...reactions[index], count: reactions[index].count + 1, reactedByMe: true }
+      return { ...item, reactions }
+    }
+    setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map(update) } : chat))
+    if (backendEnabled && activeChat.serverId) {
+      const saved = await backendRequest<{ error?: string }>(`/api/chats/${activeChat.serverId}/messages/${message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) })
+      if (!saved.ok) {
+        setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map(update) } : chat))
+        toast.error(saved.data?.error || "Не удалось поставить реакцию")
+      }
+    }
+  }
+
+  const retryMessage = (message: Message) => {
+    if (!activeChat || message.status !== "error") return
+    setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: chat.messages.map((item) => item.id === message.id ? { ...item, status: "sending" } : item) } : chat))
+    void sendToBackend(activeChat, { ...message, status: "sending" })
+  }
+
+  const loadOlderMessages = async () => {
+    if (!activeChat?.serverId || !activeChat.hasMore || !activeChat.oldestMessageAt) return
+    const result = await backendRequest<{ messages?: ServerMessage[]; hasMore?: boolean; nextBefore?: number | null }>(`/api/chats/${activeChat.serverId}/messages?before=${activeChat.oldestMessageAt}&limit=50`)
+    if (!result.ok) { toast.error("Не удалось загрузить историю"); return }
+    const older = (result.data?.messages || []).map((message) => mapServerMessage(message, profile.username))
+    setChats((current) => current.map((chat) => chat.id === activeChat.id ? { ...chat, messages: [...older, ...chat.messages.filter((message) => !older.some((old) => old.id === message.id))], hasMore: Boolean(result.data?.hasMore), oldestMessageAt: result.data?.nextBefore || chat.oldestMessageAt } : chat))
   }
 
   const attachFile = (file?: File) => {
@@ -841,6 +982,17 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
     })()
   }
 
+  const blockActiveContact = async () => {
+    if (!activeChat || !backendEnabled) { toast.info("Блокировка доступна в серверном режиме"); return }
+    const result = await backendRequest<{ error?: string }>(`/api/users/${encodeURIComponent(activeChat.username)}/block`, { method: "POST", body: "{}" })
+    if (!result.ok) { toast.error(result.data?.error || "Не удалось заблокировать пользователя"); return }
+    setChats((current) => current.filter((chat) => chat.id !== activeChat.id))
+    setActiveId((current) => current === activeChat.id ? "" : current)
+    setChatInfoOpen(false)
+    setMobileChatOpen(false)
+    toast.success(`${activeChat.name} заблокирован`)
+  }
+
   useEffect(() => {
     const context = (document as Document & { modelContext?: WebMCPContext }).modelContext
     if (!context?.registerTool) return
@@ -904,15 +1056,16 @@ function Messenger({ username, onHome, onSignOut }: { username: string; onHome: 
         </aside>
         <section className={mobileChatOpen ? "conversation conversation-open" : "conversation"}>
           {activeChat ? <><header className="conversation-header"><Button variant="ghost" size="icon" onClick={() => setMobileChatOpen(false)} className="mobile-back rounded-full text-white hover:bg-white/7 hover:text-white" aria-label="Назад к чатам"><ArrowLeft /></Button><button onClick={() => setChatInfoOpen(true)} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left" aria-label="Открыть профиль собеседника"><Avatar initials={activeChat.initials} hue={activeChat.hue} imageUrl={activeChat.imageUrl} small /><span className="min-w-0 flex-1"><span className="block truncate font-medium">{activeChat.name}</span><span className="mt-0.5 block text-xs text-white/35">{activeChat.serverId && typingChats.has(activeChat.serverId) ? "печатает…" : activeChat.online ? "в сети" : activeChat.username}</span></span></button></header>
-          <MessageArea chat={activeChat} />
+          <MessageArea chat={activeChat} onReply={beginReply} onEdit={beginEdit} onDelete={deleteMessage} onReact={toggleReaction} onRetry={retryMessage} onLoadOlder={loadOlderMessages} />
           <div className="composer-wrap"><AnimatePresence>{recording && <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} className="recording-bar"><span className="recording-dot" /><strong>{formatDuration(recordSeconds)}</strong><span className="text-white/38">Идёт запись</span><button onClick={() => stopVoice(false)} className="ml-auto rounded-full px-3 py-1.5 text-sm text-white/46 hover:bg-white/7 hover:text-white">Отменить</button><Button size="icon" onClick={() => stopVoice(true)} className="rounded-full bg-white text-black hover:bg-white/88"><Send /></Button></motion.div>}</AnimatePresence>
-            {!recording && <><input ref={attachmentRef} type="file" className="hidden" onChange={(event) => { attachFile(event.target.files?.[0]); event.currentTarget.value = "" }} /><form onSubmit={sendText} className="composer"><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Прикрепить файл" onClick={() => attachmentRef.current?.click()}><Paperclip /></Button><Textarea ref={composerRef} rows={1} value={draft} maxLength={4000} onChange={(event) => setDraft(event.target.value)} onInput={(event) => { const field = event.currentTarget; field.style.height = "auto"; field.style.height = `${Math.min(field.scrollHeight, 132)}px` }} placeholder="Сообщение" className="message-composer min-h-0 flex-1 resize-none border-0 bg-transparent px-1 py-2 text-base shadow-none placeholder:text-white/25 focus-visible:ring-0" /><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Записать кружочек" onClick={() => setVideoOpen(true)}><Camera /></Button>{draft.trim() ? <Button type="submit" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label="Отправить"><Send /></Button> : <Button type="button" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label="Записать голосовое" onClick={startVoice}><Mic /></Button>}</form></>}
+            {!recording && <><input ref={attachmentRef} type="file" className="hidden" onChange={(event) => { attachFile(event.target.files?.[0]); event.currentTarget.value = "" }} />{(replyingTo || editingMessage) && <div className="composer-context"><span className="composer-context-icon">{editingMessage ? <Pencil /> : <Reply />}</span><span className="min-w-0 flex-1"><strong>{editingMessage ? "Редактирование" : `Ответ ${replyingTo?.sender === "me" ? "себе" : activeChat.name}`}</strong><small>{messagePreview(editingMessage || replyingTo)}</small></span><button type="button" onClick={() => { setReplyingTo(null); setEditingMessage(null); if (editingMessage) setDraft("") }} aria-label="Отменить"><X /></button></div>}<form onSubmit={sendText} className="composer"><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Прикрепить файл" onClick={() => attachmentRef.current?.click()}><Paperclip /></Button><Textarea ref={composerRef} rows={1} value={draft} maxLength={4000} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && (replyingTo || editingMessage)) { event.preventDefault(); setReplyingTo(null); setEditingMessage(null); if (editingMessage) setDraft("") } if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} onInput={(event) => { const field = event.currentTarget; field.style.height = "auto"; field.style.height = `${Math.min(field.scrollHeight, 132)}px` }} placeholder={editingMessage ? "Изменить сообщение" : "Сообщение"} className="message-composer min-h-0 flex-1 resize-none border-0 bg-transparent px-1 py-2 text-base shadow-none placeholder:text-white/25 focus-visible:ring-0" /><Button type="button" variant="ghost" size="icon" className="composer-action rounded-full text-white/44 hover:bg-white/7 hover:text-white" aria-label="Записать кружочек" onClick={() => setVideoOpen(true)}><Camera /></Button>{draft.trim() ? <Button type="submit" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label={editingMessage ? "Сохранить" : "Отправить"}>{editingMessage ? <Check /> : <Send />}</Button> : <Button type="button" size="icon" className="composer-action rounded-full bg-white text-black hover:bg-white/88" aria-label="Записать голосовое" onClick={startVoice}><Mic /></Button>}</form></>}
           </div></> : <EmptyConversation loading={backendLoading} onSearch={() => { setMobileChatOpen(false); window.setTimeout(() => searchRef.current?.focus(), 80) }} />}
         </section>
         <VideoRecorderDialog open={videoOpen} onOpenChange={setVideoOpen} onSend={(url, duration) => pushMessage({ sender: "me", kind: "video", mediaUrl: url, duration })} />
         {profileOpen && <ProfileDialog open onOpenChange={setProfileOpen} profile={profile} onSave={saveProfile} />}
-        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} profile={profile} theme={theme} onThemeChange={setTheme} onEditProfile={() => { setSettingsOpen(false); setProfileOpen(true) }} onHome={() => { setSettingsOpen(false); onHome() }} onSignOut={onSignOut} />
-        {activeChat && <ChatInfoDialog open={chatInfoOpen} onOpenChange={setChatInfoOpen} chat={activeChat} />}
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} profile={profile} theme={theme} onThemeChange={setTheme} onEditProfile={() => { setSettingsOpen(false); setProfileOpen(true) }} onSecurity={() => { setSettingsOpen(false); setSecurityOpen(true) }} onHome={() => { setSettingsOpen(false); onHome() }} onSignOut={onSignOut} />
+        <SecurityDialog open={securityOpen} onOpenChange={setSecurityOpen} backendEnabled={backendEnabled} onAccountDeleted={onSignOut} />
+        {activeChat && <ChatInfoDialog open={chatInfoOpen} onOpenChange={setChatInfoOpen} chat={activeChat} onBlock={blockActiveContact} backendEnabled={backendEnabled} />}
         <Dialog open={Boolean(pendingDeleteChat)} onOpenChange={(open) => { if (!open) setPendingDeleteChat(null) }}><DialogContent className="max-w-[390px] rounded-[24px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle>Удалить чат?</DialogTitle><DialogDescription className="text-white/42">Диалог с {pendingDeleteChat?.name} исчезнет из вашего списка. У собеседника история останется.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" className="border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => setPendingDeleteChat(null)}>Отмена</Button><Button variant="destructive" onClick={deleteChat}><Trash2 className="mr-2 size-4" />Удалить</Button></DialogFooter></DialogContent></Dialog>
       </TooltipProvider>
     </motion.main>
@@ -931,17 +1084,50 @@ function Avatar({ initials, hue, small = false, imageUrl = "" }: { initials: str
   return <span className={`${small ? "size-10" : "size-12"} grid shrink-0 place-items-center overflow-hidden rounded-full bg-gradient-to-br ${hue} text-xs font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,.2)]`}>{imageUrl ? <img src={imageUrl} alt="" className="h-full w-full object-cover" /> : initials}</span>
 }
 
-function MessageArea({ chat }: { chat: Chat }) {
-  const endRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }) }, [chat.messages.length, chat.id])
-  return <div className="message-area scrollbar-thin"><div className="mx-auto flex min-h-full w-full max-w-[820px] flex-col justify-end px-4 py-7 sm:px-7">{chat.messages.length === 0 ? <div className="m-auto flex max-w-sm flex-col items-center py-20 text-center"><div className="grid size-16 place-items-center rounded-[22px] border border-white/9 bg-white/[0.035]"><MessageCircle className="size-6 text-white/55" /></div><h3 className="mt-5 text-xl font-medium">Сообщений пока нет</h3><p className="mt-2 text-sm leading-6 text-white/38">Напишите первым — здесь появится история разговора.</p></div> : <AnimatePresence initial={false}>{chat.messages.map((message) => <MessageBubble key={message.id} message={message} avatar={chat} />)}</AnimatePresence>}<div ref={endRef} /></div></div>
+type MessageActions = {
+  onReply: (message: Message) => void
+  onEdit: (message: Message) => void
+  onDelete: (message: Message) => void
+  onReact: (message: Message, emoji: string) => void
+  onRetry: (message: Message) => void
+  onLoadOlder: () => void
 }
 
-function MessageBubble({ message, avatar }: { message: Message; avatar: Chat }) {
+function MessageArea({ chat, onReply, onEdit, onDelete, onReact, onRetry, onLoadOlder }: { chat: Chat } & MessageActions) {
+  const endRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }) }, [chat.messages.length, chat.id])
+  return <div className="message-area scrollbar-thin" role="log" aria-live="polite" aria-label={`Переписка с ${chat.name}`}><div className="mx-auto flex min-h-full w-full max-w-[820px] flex-col justify-end px-4 py-7 sm:px-7">{chat.messages.length === 0 ? <div className="m-auto flex max-w-sm flex-col items-center py-20 text-center"><div className="grid size-16 place-items-center rounded-[22px] border border-white/9 bg-white/[0.035]"><MessageCircle className="size-6 text-white/55" /></div><h3 className="mt-5 text-xl font-medium">Сообщений пока нет</h3><p className="mt-2 text-sm leading-6 text-white/38">Напишите первым — здесь появится история разговора.</p></div> : <><div className="flex justify-center">{chat.hasMore && <button className="load-older" onClick={onLoadOlder}>Показать предыдущие сообщения</button>}</div><AnimatePresence initial={false}>{chat.messages.map((message) => {
+    const day = message.createdAt ? new Date(message.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: new Date(message.createdAt).getFullYear() === new Date().getFullYear() ? undefined : "numeric" }) : ""
+    const index = chat.messages.indexOf(message)
+    const previousCreatedAt = index > 0 ? chat.messages[index - 1].createdAt : null
+    const previousDay = previousCreatedAt ? new Date(previousCreatedAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: new Date(previousCreatedAt).getFullYear() === new Date().getFullYear() ? undefined : "numeric" }) : ""
+    const showDay = Boolean(day && day !== previousDay)
+    return <div key={message.id}>{showDay && <div className="date-separator"><span>{day}</span></div>}<MessageBubble message={message} avatar={chat} onReply={onReply} onEdit={onEdit} onDelete={onDelete} onReact={onReact} onRetry={onRetry} /></div>
+  })}</AnimatePresence></>}<div ref={endRef} /></div></div>
+}
+
+function MessageBubble({ message, avatar, onReply, onEdit, onDelete, onReact, onRetry }: { message: Message; avatar: Chat } & Omit<MessageActions, "onLoadOlder">) {
   const mine = message.sender === "me"
   const bubbleClass = `${mine ? "bubble bubble-me" : "bubble"}${message.kind === "text" ? " bubble-text" : ""}`
-  if (message.kind === "video") return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} imageUrl={avatar.imageUrl} small />}<div className="video-message"><VideoCircle mediaUrl={message.mediaUrl} duration={message.duration ?? 0} /><span className="video-message-time">{message.time}{mine && <Check className="size-3" />}</span></div></motion.div>
-  return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} imageUrl={avatar.imageUrl} small />}<div className={bubbleClass}>{message.kind === "text" && <p>{message.body}</p>}{message.kind === "voice" && <VoiceBubble duration={message.duration ?? 1} mediaUrl={message.mediaUrl} mine={mine} />}{message.kind === "file" && <FileBubble message={message} mine={mine} />}<span className={mine ? "message-time text-black/42" : "message-time text-white/30"}>{message.time}{mine && <Check className="size-3" />}</span></div></motion.div>
+  const actions = <MessageMenu message={message} onReply={onReply} onEdit={onEdit} onDelete={onDelete} onReact={onReact} onRetry={onRetry} />
+  if (message.kind === "video" && !message.deletedAt) return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} imageUrl={avatar.imageUrl} small />}{mine && actions}<div className="video-message"><VideoCircle mediaUrl={message.mediaUrl} duration={message.duration ?? 0} /><span className="video-message-time">{message.time}{mine && <DeliveryMark status={message.status} />}</span><ReactionRow message={message} onReact={onReact} /></div>{!mine && actions}</motion.div>
+  return <motion.div initial={{ opacity: 0, x: mine ? 14 : -14, y: 5 }} animate={{ opacity: 1, x: 0, y: 0 }} exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.26, ease }} className={mine ? "message-row message-row-me" : "message-row"}>{!mine && <Avatar initials={avatar.initials} hue={avatar.hue} imageUrl={avatar.imageUrl} small />}{mine && actions}<div className={bubbleClass}>{message.replyTo && !message.deletedAt && <div className={mine ? "reply-preview reply-preview-me" : "reply-preview"}><strong>{message.replyTo.senderName}</strong><span>{message.replyTo.body || messagePreview({ kind: message.replyTo.kind } as Message)}</span></div>}{message.deletedAt ? <p className="deleted-message">Сообщение удалено</p> : <>{message.kind === "text" && <p>{message.body}</p>}{message.kind === "voice" && <VoiceBubble duration={message.duration ?? 1} mediaUrl={message.mediaUrl} mine={mine} />}{message.kind === "file" && <FileBubble message={message} mine={mine} />}</>}<span className={mine ? "message-time text-black/42" : "message-time text-white/30"}>{message.editedAt && !message.deletedAt && <em>изм.</em>}{message.time}{mine && <DeliveryMark status={message.status} />}</span><ReactionRow message={message} onReact={onReact} /></div>{!mine && actions}</motion.div>
+}
+
+function MessageMenu({ message, onReply, onEdit, onDelete, onReact, onRetry }: { message: Message } & Omit<MessageActions, "onLoadOlder">) {
+  return <DropdownMenu><DropdownMenuTrigger asChild><button className="message-menu-trigger" aria-label="Действия с сообщением"><MoreHorizontal /></button></DropdownMenuTrigger><DropdownMenuContent align={message.sender === "me" ? "end" : "start"} className="message-menu"><DropdownMenuItem onClick={() => onReply(message)} disabled={Boolean(message.deletedAt)}><Reply />Ответить</DropdownMenuItem>{message.sender === "me" && message.kind === "text" && !message.deletedAt && <DropdownMenuItem onClick={() => onEdit(message)}><Pencil />Изменить</DropdownMenuItem>}{message.status === "error" && <DropdownMenuItem onClick={() => onRetry(message)}><RotateCcw />Повторить отправку</DropdownMenuItem>}{!message.deletedAt && <div className="reaction-picker" aria-label="Поставить реакцию">{["👍", "❤️", "😂", "🔥", "👏", "😮"].map((emoji) => <button key={emoji} onClick={() => onReact(message, emoji)}>{emoji}</button>)}</div>}{message.sender === "me" && <DropdownMenuItem className="text-rose-300 focus:text-rose-200" onClick={() => onDelete(message)}><Trash2 />Удалить</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+}
+
+function ReactionRow({ message, onReact }: { message: Message; onReact: (message: Message, emoji: string) => void }) {
+  if (!message.reactions?.length || message.deletedAt) return null
+  return <div className={message.sender === "me" ? "reaction-row reaction-row-me" : "reaction-row"}>{message.reactions.map((reaction) => <button key={reaction.emoji} onClick={() => onReact(message, reaction.emoji)} className={reaction.reactedByMe ? "reaction-chip reaction-chip-active" : "reaction-chip"}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>
+}
+
+function DeliveryMark({ status }: { status?: Message["status"] }) {
+  if (status === "sending") return <span className="delivery-mark" title="Отправляется">…</span>
+  if (status === "error") return <span className="delivery-mark delivery-error" title="Не отправлено">!</span>
+  if (status === "read") return <span className="delivery-mark delivery-read" title="Прочитано"><Check /><Check /></span>
+  return <span className="delivery-mark" title="Доставлено"><Check /></span>
 }
 
 function FileBubble({ message, mine }: { message: Message; mine: boolean }) {
@@ -1021,14 +1207,60 @@ function ProfileDialog({ open, onOpenChange, profile, onSave }: { open: boolean;
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[520px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Мой профиль</DialogTitle><DialogDescription className="text-white/42">Аватар, отображаемое имя и короткое описание.</DialogDescription></DialogHeader><input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(event) => choose(event.target.files?.[0])} /><button type="button" onClick={() => fileRef.current?.click()} className="mx-auto grid size-28 place-items-center overflow-hidden rounded-full border border-dashed border-white/20 bg-white/[0.035]" aria-label="Выбрать фото профиля">{imageUrl ? <img src={imageUrl} alt="Предпросмотр аватара" className="h-full w-full object-cover" /> : <ImagePlus className="size-7 text-white/55" />}</button><div className="space-y-4"><label className="block"><span className="field-label">Имя</span><div className="auth-input-wrap"><Input value={name} maxLength={48} onChange={(event) => setName(event.target.value)} className="h-auto border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0" /></div></label><label className="block"><span className="field-label">О себе</span><div className="auth-input-wrap"><Input value={bio} maxLength={96} onChange={(event) => setBio(event.target.value)} placeholder="Пара слов о себе" className="h-auto border-0 bg-transparent p-0 text-base shadow-none focus-visible:ring-0" /></div></label></div><DialogFooter><Button variant="outline" className="border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Отмена</Button><Button className="bg-white text-black hover:bg-white/88" onClick={save}>Сохранить</Button></DialogFooter></DialogContent></Dialog>
 }
 
-function SettingsDialog({ open, onOpenChange, profile, theme, onThemeChange, onEditProfile, onHome, onSignOut }: { open: boolean; onOpenChange: (open: boolean) => void; profile: Profile; theme: AccentTheme; onThemeChange: (theme: AccentTheme) => void; onEditProfile: () => void; onHome: () => void; onSignOut: () => void }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[480px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Настройки</DialogTitle><DialogDescription className="text-white/42">Профиль, оформление и текущая сессия.</DialogDescription></DialogHeader><button onClick={onEditProfile} className="settings-row"><Avatar initials={profile.initials} hue="from-stone-500 to-zinc-800" imageUrl={profile.imageUrl} /><span className="min-w-0 flex-1 text-left"><strong className="block truncate">{profile.name}</strong><small className="mt-1 block text-white/38">{profile.username} · Мой профиль</small></span><UserRound className="size-5 text-white/34" /></button><div className="settings-section"><div className="flex items-center gap-2 text-sm font-medium"><Palette className="size-4 text-white/50" />Акцент интерфейса</div><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={() => onThemeChange("sand")} className={theme === "sand" ? "theme-choice theme-choice-active" : "theme-choice"}><span className="theme-dot bg-[#b9a78d]" />Песочный</button><button onClick={() => onThemeChange("violet")} className={theme === "violet" ? "theme-choice theme-choice-active" : "theme-choice"}><span className="theme-dot bg-[#8b76ff]" />Фиолетовый</button></div></div><div className="grid gap-2"><button onClick={onHome} className="settings-action"><Home className="size-4" />На главную</button><button onClick={onSignOut} className="settings-action text-rose-300"><LogOut className="size-4" />Выйти из аккаунта</button></div></DialogContent></Dialog>
+function SettingsDialog({ open, onOpenChange, profile, theme, onThemeChange, onEditProfile, onSecurity, onHome, onSignOut }: { open: boolean; onOpenChange: (open: boolean) => void; profile: Profile; theme: AccentTheme; onThemeChange: (theme: AccentTheme) => void; onEditProfile: () => void; onSecurity: () => void; onHome: () => void; onSignOut: () => void }) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[480px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Настройки</DialogTitle><DialogDescription className="text-white/42">Профиль, оформление и безопасность аккаунта.</DialogDescription></DialogHeader><button onClick={onEditProfile} className="settings-row"><Avatar initials={profile.initials} hue="from-stone-500 to-zinc-800" imageUrl={profile.imageUrl} /><span className="min-w-0 flex-1 text-left"><strong className="block truncate">{profile.name}</strong><small className="mt-1 block text-white/38">{profile.username} · Мой профиль</small></span><UserRound className="size-5 text-white/34" /></button><div className="settings-section"><div className="flex items-center gap-2 text-sm font-medium"><Palette className="size-4 text-white/50" />Акцент интерфейса</div><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={() => onThemeChange("sand")} className={theme === "sand" ? "theme-choice theme-choice-active" : "theme-choice"}><span className="theme-dot bg-[#b9a78d]" />Песочный</button><button onClick={() => onThemeChange("violet")} className={theme === "violet" ? "theme-choice theme-choice-active" : "theme-choice"}><span className="theme-dot bg-[#8b76ff]" />Фиолетовый</button></div></div><div className="grid gap-2"><button onClick={onSecurity} className="settings-action"><ShieldCheck className="size-4" />Безопасность и устройства</button><button onClick={onHome} className="settings-action"><Home className="size-4" />На главную</button><button onClick={onSignOut} className="settings-action text-rose-300"><LogOut className="size-4" />Выйти из аккаунта</button></div></DialogContent></Dialog>
 }
 
-function ChatInfoDialog({ open, onOpenChange, chat }: { open: boolean; onOpenChange: (open: boolean) => void; chat: Chat }) {
+type AccountSession = { id: string; current: boolean; userAgent: string; ip: string; createdAt: number; lastSeenAt: number }
+
+function SecurityDialog({ open, onOpenChange, backendEnabled, onAccountDeleted }: { open: boolean; onOpenChange: (open: boolean) => void; backendEnabled: boolean; onAccountDeleted: () => void }) {
+  const [sessions, setSessions] = useState<AccountSession[]>([])
+  const [currentPassword, setCurrentPassword] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [codePassword, setCodePassword] = useState("")
+  const [newCodes, setNewCodes] = useState<string[]>([])
+  const [deletePassword, setDeletePassword] = useState("")
+  const [busy, setBusy] = useState(false)
+  const loadSessions = useCallback(() => {
+    if (!open || !backendEnabled) return
+    void backendRequest<{ sessions?: AccountSession[] }>("/api/sessions").then((result) => { if (result.ok) setSessions(result.data?.sessions || []) })
+  }, [backendEnabled, open])
+  useEffect(loadSessions, [loadSessions])
+  const changePassword = async (event: FormEvent) => {
+    event.preventDefault()
+    setBusy(true)
+    const result = await backendRequest<{ error?: string }>("/api/me/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) })
+    setBusy(false)
+    if (!result.ok) { toast.error(result.data?.error || "Не удалось сменить пароль"); return }
+    setCurrentPassword(""); setNewPassword(""); toast.success("Пароль изменён, остальные сессии завершены"); loadSessions()
+  }
+  const regenerateCodes = async () => {
+    setBusy(true)
+    const result = await backendRequest<{ recoveryCodes?: string[]; error?: string }>("/api/me/recovery-codes", { method: "POST", body: JSON.stringify({ password: codePassword }) })
+    setBusy(false)
+    if (!result.ok) { toast.error(result.data?.error || "Не удалось создать коды"); return }
+    setNewCodes(result.data?.recoveryCodes || []); setCodePassword("")
+  }
+  const closeSession = async (session: AccountSession) => {
+    const result = await backendRequest<{ current?: boolean }>(`/api/sessions/${session.id}`, { method: "DELETE" })
+    if (!result.ok) { toast.error("Не удалось завершить сессию"); return }
+    if (result.data?.current) onAccountDeleted(); else loadSessions()
+  }
+  const deleteAccount = async () => {
+    if (!window.confirm("Удалить аккаунт, все диалоги и загруженные файлы без возможности восстановления?")) return
+    setBusy(true)
+    const result = await backendRequest<{ error?: string }>("/api/me", { method: "DELETE", body: JSON.stringify({ password: deletePassword }) })
+    setBusy(false)
+    if (!result.ok) { toast.error(result.data?.error || "Не удалось удалить аккаунт"); return }
+    onAccountDeleted()
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[88svh] max-w-[620px] overflow-y-auto rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><DialogHeader><DialogTitle className="text-2xl tracking-[-0.04em]">Безопасность</DialogTitle><DialogDescription className="text-white/42">Пароль, коды восстановления и активные устройства.</DialogDescription></DialogHeader>{!backendEnabled ? <p className="rounded-2xl border border-white/8 bg-white/[0.025] p-4 text-sm text-white/48">Эти настройки доступны после подключения серверного режима.</p> : <Tabs defaultValue="password"><TabsList className="grid w-full grid-cols-3 bg-white/5"><TabsTrigger value="password">Пароль</TabsTrigger><TabsTrigger value="codes">Коды</TabsTrigger><TabsTrigger value="sessions">Устройства</TabsTrigger></TabsList><TabsContent value="password"><form onSubmit={changePassword} className="security-panel"><Input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} placeholder="Текущий пароль" required /><Input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} placeholder="Новый пароль" minLength={5} required /><Button disabled={busy} className="bg-white text-black hover:bg-white/88">Сменить пароль</Button><div className="danger-zone"><strong>Удаление аккаунта</strong><p>Все диалоги, сессии и загруженные файлы будут удалены с этого устройства.</p><Input type="password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} placeholder="Пароль для подтверждения" /><Button type="button" variant="destructive" disabled={busy || !deletePassword} onClick={deleteAccount}>Удалить аккаунт</Button></div></form></TabsContent><TabsContent value="codes"><div className="security-panel"><p>Новые коды заменят все старые. Сохраните их вне этого устройства.</p><Input type="password" value={codePassword} onChange={(event) => setCodePassword(event.target.value)} placeholder="Текущий пароль" />{newCodes.length > 0 && <div className="recovery-code-grid">{newCodes.map((code) => <code key={code}>{code}</code>)}</div>}<div className="flex gap-2"><Button disabled={busy || !codePassword} onClick={regenerateCodes} className="bg-white text-black hover:bg-white/88">Создать новые коды</Button>{newCodes.length > 0 && <Button variant="outline" onClick={() => { void navigator.clipboard?.writeText(newCodes.join("\n")); toast.success("Коды скопированы") }}>Скопировать</Button>}</div></div></TabsContent><TabsContent value="sessions"><div className="security-panel">{sessions.map((session) => <div key={session.id} className="session-row"><span className="min-w-0 flex-1"><strong>{session.current ? "Это устройство" : session.userAgent}</strong><small>{session.ip || "IP не определён"} · {new Date(session.createdAt).toLocaleDateString("ru-RU")}</small></span><Button size="sm" variant="outline" onClick={() => closeSession(session)}>{session.current ? "Выйти" : "Завершить"}</Button></div>)}</div></TabsContent></Tabs>}</DialogContent></Dialog>
+}
+
+function ChatInfoDialog({ open, onOpenChange, chat, onBlock, backendEnabled }: { open: boolean; onOpenChange: (open: boolean) => void; chat: Chat; onBlock: () => void; backendEnabled: boolean }) {
   const mediaCount = chat.messages.filter((message) => message.kind === "video" || (message.kind === "file" && message.fileType?.startsWith("image/"))).length
   const fileCount = chat.messages.filter((message) => message.kind === "file").length
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[440px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><div className="mx-auto"><Avatar initials={chat.initials} hue={chat.hue} imageUrl={chat.imageUrl} /></div><DialogHeader><DialogTitle className="text-center text-2xl tracking-[-0.04em]">{chat.name}</DialogTitle><DialogDescription className="text-center text-white/42">{chat.username} · {chat.online ? "сейчас в сети" : "не в сети"}</DialogDescription></DialogHeader><p className="rounded-[18px] border border-white/8 bg-white/[0.025] p-4 text-sm leading-6 text-white/62">{chat.bio}</p><div className="grid grid-cols-3 gap-2"><div className="profile-stat"><strong>{chat.messages.length}</strong><span>сообщений</span></div><div className="profile-stat"><strong>{mediaCount}</strong><span>медиа</span></div><div className="profile-stat"><strong>{fileCount}</strong><span>файлов</span></div></div><Button variant="outline" className="w-full border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Вернуться в чат</Button></DialogContent></Dialog>
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-[440px] rounded-[26px] border-white/10 bg-[#0d0d0f] p-6 text-white"><div className="mx-auto"><Avatar initials={chat.initials} hue={chat.hue} imageUrl={chat.imageUrl} /></div><DialogHeader><DialogTitle className="text-center text-2xl tracking-[-0.04em]">{chat.name}</DialogTitle><DialogDescription className="text-center text-white/42">{chat.username} · {chat.online ? "сейчас в сети" : "не в сети"}</DialogDescription></DialogHeader><p className="rounded-[18px] border border-white/8 bg-white/[0.025] p-4 text-sm leading-6 text-white/62">{chat.bio}</p><div className="grid grid-cols-3 gap-2"><div className="profile-stat"><strong>{chat.messages.length}</strong><span>сообщений</span></div><div className="profile-stat"><strong>{mediaCount}</strong><span>медиа</span></div><div className="profile-stat"><strong>{fileCount}</strong><span>файлов</span></div></div><div className="grid gap-2"><Button variant="outline" className="w-full border-white/10 bg-transparent text-white hover:bg-white/8 hover:text-white" onClick={() => onOpenChange(false)}>Вернуться в чат</Button>{backendEnabled && <Button variant="ghost" className="text-rose-300 hover:bg-rose-500/8 hover:text-rose-200" onClick={() => { if (window.confirm(`Заблокировать ${chat.name}? Пользователь не сможет найти вас и написать.`)) onBlock() }}>Заблокировать пользователя</Button>}</div></DialogContent></Dialog>
 }
 
 function formatDuration(seconds: number) {
@@ -1041,6 +1273,14 @@ function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} Б`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`
+}
+
+function messagePreview(message?: Pick<Message, "kind" | "body" | "fileName"> | null) {
+  if (!message) return "Сообщение"
+  if (message.kind === "voice") return "Голосовое сообщение"
+  if (message.kind === "video") return "Кружочек"
+  if (message.kind === "file") return message.fileName ? `Файл: ${message.fileName}` : "Файл"
+  return message.body || "Сообщение"
 }
 
 function getInitials(name: string) {

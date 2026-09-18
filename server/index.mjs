@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto"
 import { createReadStream } from "node:fs"
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { extname, join, normalize, resolve, sep } from "node:path"
 import { promisify } from "node:util"
@@ -45,7 +45,7 @@ const mimeTypes = {
   ".zip": "application/zip",
 }
 
-const emptyDatabase = () => ({ version: 2, users: [], sessions: [], conversations: [], messages: [] })
+const emptyDatabase = () => ({ version: 4, users: [], sessions: [], conversations: [], messages: [], uploads: [] })
 let database = emptyDatabase()
 
 const recoveryAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -127,16 +127,20 @@ function persist() {
 }
 
 function getSessionUser(request) {
-  const token = parseCookies(request).fg_session
-  if (!token) return null
-  const session = database.sessions.find((item) => item.tokenHash === hashToken(token) && item.expiresAt > Date.now())
+  const session = getSession(request)
   return session ? database.users.find((user) => user.id === session.userId) || null : null
 }
 
-async function createSession(response, userId) {
+function getSession(request) {
+  const token = parseCookies(request).fg_session
+  if (!token) return null
+  return database.sessions.find((item) => item.tokenHash === hashToken(token) && item.expiresAt > Date.now()) || null
+}
+
+async function createSession(response, userId, request) {
   const token = randomBytes(32).toString("base64url")
   database.sessions = database.sessions.filter((session) => session.expiresAt > Date.now())
-  database.sessions.push({ id: randomUUID(), userId, tokenHash: hashToken(token), expiresAt: Date.now() + sessionMaxAge * 1000 })
+  database.sessions.push({ id: randomUUID(), userId, tokenHash: hashToken(token), createdAt: Date.now(), lastSeenAt: Date.now(), userAgent: String(request?.headers?.["user-agent"] || "Неизвестное устройство").slice(0, 240), ip: String(request?.headers?.["x-forwarded-for"] || request?.socket?.remoteAddress || "").split(",")[0].trim(), expiresAt: Date.now() + sessionMaxAge * 1000 })
   await persist()
   const cookie = [`fg_session=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionMaxAge}`]
   if (secureCookie) cookie.push("Secure")
@@ -171,23 +175,54 @@ function getConversationForUser(id, userId) {
   return database.conversations.find((conversation) => conversation.id === id && conversation.participants.includes(userId))
 }
 
-function serializeMessage(message) {
-  const sender = database.users.find((user) => user.id === message.senderId)
-  return { ...message, sender: sender ? publicUser(sender) : null }
+function relatedUserIds(userId) {
+  return [...new Set([userId, ...database.conversations.filter((conversation) => conversation.participants.includes(userId)).flatMap((conversation) => conversation.participants)])]
 }
 
-function serializeConversation(conversation, currentUserId) {
+function serializeMessage(message, currentUserId, conversation) {
+  const sender = database.users.find((user) => user.id === message.senderId)
+  const reply = message.replyToId ? database.messages.find((item) => item.id === message.replyToId && item.conversationId === message.conversationId) : null
+  const replySender = reply ? database.users.find((user) => user.id === reply.senderId) : null
+  const otherId = conversation?.participants.find((id) => id !== message.senderId)
+  const otherReadAt = Number(conversation?.readAt?.[otherId] || 0)
+  const delivery = message.senderId === currentUserId ? (otherReadAt >= message.createdAt ? "read" : "delivered") : "delivered"
+  const reactionGroups = Object.entries(message.reactions || {}).map(([emoji, userIds]) => ({ emoji, count: userIds.length, reactedByMe: userIds.includes(currentUserId) })).filter((reaction) => reaction.count > 0)
+  return { ...message, sender: sender ? publicUser(sender) : null, delivery, reactions: reactionGroups, replyTo: reply ? { id: reply.id, kind: reply.kind, body: reply.deletedAt ? "Сообщение удалено" : reply.body, senderName: replySender?.name || replySender?.username || "Пользователь" } : null }
+}
+
+function serializeConversation(conversation, currentUserId, limit = 50) {
   const otherId = conversation.participants.find((id) => id !== currentUserId) || currentUserId
   const other = database.users.find((user) => user.id === otherId)
-  const messages = database.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt - b.createdAt)
+  const allMessages = database.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt - b.createdAt)
+  const messages = allMessages.slice(-limit)
   const readAt = Number(conversation.readAt?.[currentUserId] || 0)
-  const unread = messages.filter((message) => message.senderId !== currentUserId && message.createdAt > readAt).length
-  return { id: conversation.id, person: other ? publicUser(other) : null, messages: messages.map(serializeMessage), unread, updatedAt: conversation.updatedAt }
+  const unread = allMessages.filter((message) => message.senderId !== currentUserId && message.createdAt > readAt).length
+  return { id: conversation.id, person: other ? publicUser(other) : null, messages: messages.map((message) => serializeMessage(message, currentUserId, conversation)), unread, updatedAt: conversation.updatedAt, hasMore: allMessages.length > messages.length, oldestMessageAt: messages[0]?.createdAt || null }
 }
 
 function broadcast(userIds, event, payload) {
   const body = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
   for (const userId of userIds) for (const response of sseClients.get(userId) || []) response.write(body)
+}
+
+function broadcastConversation(conversation, event, message) {
+  for (const participantId of conversation.participants) {
+    broadcast([participantId], event, { conversationId: conversation.id, message: serializeMessage(message, participantId, conversation), chat: serializeConversation(conversation, participantId) })
+  }
+}
+
+async function cleanupOrphanUploads() {
+  const referenced = new Set([
+    ...database.messages.map((message) => message.mediaUrl).filter(Boolean),
+    ...database.users.map((user) => user.avatarUrl).filter(Boolean),
+  ])
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000
+  const orphaned = database.uploads.filter((upload) => upload.createdAt < cutoff && !referenced.has(upload.url))
+  if (!orphaned.length) return
+  const orphanIds = new Set(orphaned.map((upload) => upload.id))
+  database.uploads = database.uploads.filter((upload) => !orphanIds.has(upload.id))
+  await Promise.all(orphaned.map((upload) => unlink(join(uploadsDir, upload.fileName)).catch(() => undefined)))
+  await persist()
 }
 
 async function handleApi(request, response, url) {
@@ -206,15 +241,15 @@ async function handleApi(request, response, url) {
       if (user) return json(response, 409, { error: "Этот юзернейм уже занят." })
       const passwordData = await hashPassword(password)
       const recoveryCodes = createRecoveryCodes()
-      user = { id: randomUUID(), username, passwordSalt: passwordData.salt, passwordHash: passwordData.hash, recoveryCodeHashes: recoveryCodes.map((code) => hashToken(normalizeRecoveryCode(code))), name: username, bio: "В сети", avatarUrl: "", createdAt: Date.now(), updatedAt: Date.now() }
+      user = { id: randomUUID(), username, passwordSalt: passwordData.salt, passwordHash: passwordData.hash, recoveryCodeHashes: recoveryCodes.map((code) => hashToken(normalizeRecoveryCode(code))), blockedUserIds: [], name: username, bio: "В сети", avatarUrl: "", createdAt: Date.now(), updatedAt: Date.now() }
       database.users.push(user)
       await persist()
-      await createSession(response, user.id)
+      await createSession(response, user.id, request)
       return json(response, 201, { user: publicUser(user), recoveryCodes })
     } else {
       if (!user || !(await verifyPassword(password, user.passwordSalt, user.passwordHash))) return json(response, 401, { error: "Неверный юзернейм или пароль." })
     }
-    await createSession(response, user.id)
+    await createSession(response, user.id, request)
     return json(response, 200, { user: publicUser(user) })
   }
 
@@ -235,7 +270,7 @@ async function handleApi(request, response, url) {
     user.updatedAt = Date.now()
     database.sessions = database.sessions.filter((session) => session.userId !== user.id)
     await persist()
-    await createSession(response, user.id)
+    await createSession(response, user.id, request)
     return json(response, 200, { user: publicUser(user), recoveryCodesLeft: user.recoveryCodeHashes.length })
   }
 
@@ -258,13 +293,83 @@ async function handleApi(request, response, url) {
     if (typeof body.avatarUrl === "string" && (!body.avatarUrl || /^\/uploads\/[a-f0-9-]+\.[a-z0-9]+$/i.test(body.avatarUrl))) user.avatarUrl = body.avatarUrl.slice(0, 512)
     user.updatedAt = Date.now()
     await persist()
-    broadcast(database.users.map((item) => item.id), "profile.updated", { user: publicUser(user) })
+    broadcast(relatedUserIds(user.id), "profile.updated", { user: publicUser(user) })
     return json(response, 200, { user: publicUser(user) })
+  }
+
+  if (url.pathname === "/api/me/password" && request.method === "POST") {
+    const body = await readBody(request)
+    const currentPassword = String(body.currentPassword || "")
+    const newPassword = String(body.newPassword || "")
+    if (!(await verifyPassword(currentPassword, user.passwordSalt, user.passwordHash))) return json(response, 403, { error: "Текущий пароль указан неверно." })
+    if (newPassword.length < 5 || newPassword.length > 256) return json(response, 400, { error: "Новый пароль должен содержать от 5 до 256 символов." })
+    const passwordData = await hashPassword(newPassword)
+    user.passwordSalt = passwordData.salt
+    user.passwordHash = passwordData.hash
+    user.updatedAt = Date.now()
+    const currentSession = getSession(request)
+    database.sessions = database.sessions.filter((session) => session.userId !== user.id || session.id === currentSession?.id)
+    await persist()
+    return json(response, 200, { ok: true })
+  }
+
+  if (url.pathname === "/api/me/recovery-codes" && request.method === "POST") {
+    const body = await readBody(request)
+    if (!(await verifyPassword(String(body.password || ""), user.passwordSalt, user.passwordHash))) return json(response, 403, { error: "Пароль указан неверно." })
+    const recoveryCodes = createRecoveryCodes()
+    user.recoveryCodeHashes = recoveryCodes.map((code) => hashToken(normalizeRecoveryCode(code)))
+    user.updatedAt = Date.now()
+    await persist()
+    return json(response, 200, { recoveryCodes })
+  }
+
+  if (url.pathname === "/api/sessions" && request.method === "GET") {
+    const current = getSession(request)
+    const sessions = database.sessions.filter((session) => session.userId === user.id && session.expiresAt > Date.now()).map((session) => ({ id: session.id, current: session.id === current?.id, userAgent: session.userAgent || "Неизвестное устройство", ip: session.ip || "", createdAt: session.createdAt || session.expiresAt - sessionMaxAge * 1000, lastSeenAt: session.lastSeenAt || session.createdAt || Date.now() }))
+    return json(response, 200, { sessions })
+  }
+
+  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+  if (sessionMatch && request.method === "DELETE") {
+    const current = getSession(request)
+    const target = database.sessions.find((session) => session.id === sessionMatch[1] && session.userId === user.id)
+    if (!target) return json(response, 404, { error: "Сессия не найдена." })
+    database.sessions = database.sessions.filter((session) => session.id !== target.id)
+    await persist()
+    if (target.id === current?.id) clearSession(response)
+    return json(response, 200, { ok: true, current: target.id === current?.id })
+  }
+
+  if (url.pathname === "/api/me" && request.method === "DELETE") {
+    const body = await readBody(request)
+    if (!(await verifyPassword(String(body.password || ""), user.passwordSalt, user.passwordHash))) return json(response, 403, { error: "Пароль указан неверно." })
+    const conversationIds = database.conversations.filter((conversation) => conversation.participants.includes(user.id)).map((conversation) => conversation.id)
+    const ownedUploads = database.uploads.filter((upload) => upload.userId === user.id)
+    database.messages = database.messages.filter((message) => !conversationIds.includes(message.conversationId))
+    database.conversations = database.conversations.filter((conversation) => !conversationIds.includes(conversation.id))
+    database.sessions = database.sessions.filter((session) => session.userId !== user.id)
+    database.uploads = database.uploads.filter((upload) => upload.userId !== user.id)
+    database.users = database.users.filter((item) => item.id !== user.id).map((item) => ({ ...item, blockedUserIds: (item.blockedUserIds || []).filter((id) => id !== user.id) }))
+    await persist()
+    await Promise.all(ownedUploads.map((upload) => unlink(join(uploadsDir, upload.fileName)).catch(() => undefined)))
+    clearSession(response)
+    return json(response, 200, { ok: true })
+  }
+
+  const blockMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/block$/)
+  if (blockMatch && (request.method === "POST" || request.method === "DELETE")) {
+    const target = database.users.find((item) => item.username === normalizeUsername(blockMatch[1]))
+    if (!target || target.id === user.id) return json(response, 404, { error: "Пользователь не найден." })
+    const blocked = new Set(user.blockedUserIds || [])
+    if (request.method === "POST") blocked.add(target.id); else blocked.delete(target.id)
+    user.blockedUserIds = [...blocked]
+    await persist()
+    return json(response, 200, { blocked: request.method === "POST" })
   }
 
   if (url.pathname === "/api/users" && request.method === "GET") {
     const query = normalizeUsername(url.searchParams.get("query"))
-    const users = query.length < 2 ? [] : database.users.filter((item) => item.id !== user.id && `${item.username} ${item.name}`.toLowerCase().includes(query)).slice(0, 20).map(publicUser)
+    const users = query.length < 2 ? [] : database.users.filter((item) => item.id !== user.id && !(user.blockedUserIds || []).includes(item.id) && !(item.blockedUserIds || []).includes(user.id) && `${item.username} ${item.name}`.toLowerCase().includes(query)).slice(0, 20).map(publicUser)
     return json(response, 200, { users })
   }
 
@@ -277,6 +382,7 @@ async function handleApi(request, response, url) {
     const body = await readBody(request)
     const target = database.users.find((item) => item.username === normalizeUsername(body.username))
     if (!target || target.id === user.id) return json(response, 404, { error: "Пользователь не найден." })
+    if ((user.blockedUserIds || []).includes(target.id) || (target.blockedUserIds || []).includes(user.id)) return json(response, 403, { error: "Диалог недоступен из-за блокировки." })
     let conversation = database.conversations.find((item) => item.participants.length === 2 && item.participants.includes(user.id) && item.participants.includes(target.id))
     if (!conversation) {
       conversation = { id: randomUUID(), participants: [user.id, target.id], hiddenFor: [], readAt: { [user.id]: Date.now(), [target.id]: 0 }, createdAt: Date.now(), updatedAt: Date.now() }
@@ -316,26 +422,83 @@ async function handleApi(request, response, url) {
   }
 
   const messageMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages$/)
+  if (messageMatch && request.method === "GET") {
+    const conversation = getConversationForUser(messageMatch[1], user.id)
+    if (!conversation) return json(response, 404, { error: "Чат не найден." })
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") || 50)))
+    const before = Number(url.searchParams.get("before") || Number.MAX_SAFE_INTEGER)
+    const all = database.messages.filter((message) => message.conversationId === conversation.id && message.createdAt < before).sort((a, b) => b.createdAt - a.createdAt)
+    const page = all.slice(0, limit).reverse()
+    return json(response, 200, { messages: page.map((message) => serializeMessage(message, user.id, conversation)), hasMore: all.length > page.length, nextBefore: page[0]?.createdAt || null })
+  }
   if (messageMatch && request.method === "POST") {
     const conversation = getConversationForUser(messageMatch[1], user.id)
     if (!conversation) return json(response, 404, { error: "Чат не найден." })
+    const otherId = conversation.participants.find((id) => id !== user.id)
+    const other = database.users.find((item) => item.id === otherId)
+    if ((user.blockedUserIds || []).includes(otherId) || (other?.blockedUserIds || []).includes(user.id)) return json(response, 403, { error: "Сообщения недоступны из-за блокировки." })
     const body = await readBody(request)
     const kind = ["text", "voice", "video", "file"].includes(body.kind) ? body.kind : "text"
     const text = String(body.body || "").trim().slice(0, 4000)
     if (kind === "text" && !text) return json(response, 400, { error: "Пустое сообщение отправить нельзя." })
     const mediaUrl = String(body.mediaUrl || "").slice(0, 512)
     if (kind !== "text" && !/^\/uploads\/[a-f0-9-]+\.[a-z0-9]+$/i.test(mediaUrl)) return json(response, 400, { error: "Сначала загрузите вложение." })
-    const message = { id: randomUUID(), conversationId: conversation.id, senderId: user.id, kind, body: text, duration: Math.max(0, Math.min(3600, Number(body.duration || 0))), mediaUrl, fileName: String(body.fileName || "").slice(0, 180), fileSize: Math.max(0, Number(body.fileSize || 0)), fileType: String(body.fileType || "").slice(0, 120), createdAt: Date.now() }
+    const replyTo = body.replyToId ? database.messages.find((item) => item.id === body.replyToId && item.conversationId === conversation.id) : null
+    if (body.replyToId && !replyTo) return json(response, 400, { error: "Сообщение для ответа не найдено." })
+    const clientId = String(body.clientId || "").slice(0, 80)
+    const duplicate = clientId && database.messages.find((item) => item.senderId === user.id && item.clientId === clientId)
+    if (duplicate) return json(response, 200, { message: serializeMessage(duplicate, user.id, conversation) })
+    const message = { id: randomUUID(), clientId, conversationId: conversation.id, senderId: user.id, kind, body: text, duration: Math.max(0, Math.min(3600, Number(body.duration || 0))), mediaUrl, fileName: String(body.fileName || "").slice(0, 180), fileSize: Math.max(0, Number(body.fileSize || 0)), fileType: String(body.fileType || "").slice(0, 120), replyToId: replyTo?.id || null, reactions: {}, createdAt: Date.now(), editedAt: null, deletedAt: null }
     database.messages.push(message)
     conversation.updatedAt = message.createdAt
     conversation.hiddenFor = []
     conversation.readAt = { ...(conversation.readAt || {}), [user.id]: message.createdAt }
     await persist()
-    const serialized = serializeMessage(message)
-    for (const participantId of conversation.participants) {
-      broadcast([participantId], "message.created", { conversationId: conversation.id, message: serialized, chat: serializeConversation(conversation, participantId) })
+    broadcastConversation(conversation, "message.created", message)
+    return json(response, 201, { message: serializeMessage(message, user.id, conversation) })
+  }
+
+  const messageItemMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)$/)
+  if (messageItemMatch && (request.method === "PATCH" || request.method === "DELETE")) {
+    const conversation = getConversationForUser(messageItemMatch[1], user.id)
+    const message = conversation && database.messages.find((item) => item.id === messageItemMatch[2] && item.conversationId === conversation.id)
+    if (!conversation || !message) return json(response, 404, { error: "Сообщение не найдено." })
+    if (message.senderId !== user.id) return json(response, 403, { error: "Можно изменять только свои сообщения." })
+    if (request.method === "PATCH") {
+      if (message.kind !== "text" || message.deletedAt) return json(response, 400, { error: "Это сообщение нельзя редактировать." })
+      const body = await readBody(request)
+      const text = String(body.body || "").trim().slice(0, 4000)
+      if (!text) return json(response, 400, { error: "Пустое сообщение сохранить нельзя." })
+      message.body = text
+      message.editedAt = Date.now()
+    } else {
+      message.body = ""
+      message.mediaUrl = ""
+      message.fileName = ""
+      message.deletedAt = Date.now()
     }
-    return json(response, 201, { message: serialized })
+    conversation.updatedAt = Date.now()
+    await persist()
+    broadcastConversation(conversation, "message.updated", message)
+    return json(response, 200, { message: serializeMessage(message, user.id, conversation) })
+  }
+
+  const reactionMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/reactions$/)
+  if (reactionMatch && request.method === "POST") {
+    const conversation = getConversationForUser(reactionMatch[1], user.id)
+    const message = conversation && database.messages.find((item) => item.id === reactionMatch[2] && item.conversationId === conversation.id)
+    if (!conversation || !message) return json(response, 404, { error: "Сообщение не найдено." })
+    if (message.deletedAt) return json(response, 400, { error: "Удалённое сообщение нельзя оценить." })
+    const body = await readBody(request)
+    const emoji = String(body.emoji || "")
+    if (!["👍", "❤️", "😂", "🔥", "👏", "😮"].includes(emoji)) return json(response, 400, { error: "Эта реакция не поддерживается." })
+    message.reactions ||= {}
+    const users = new Set(message.reactions[emoji] || [])
+    if (users.has(user.id)) users.delete(user.id); else users.add(user.id)
+    message.reactions[emoji] = [...users]
+    await persist()
+    broadcastConversation(conversation, "message.updated", message)
+    return json(response, 200, { message: serializeMessage(message, user.id, conversation) })
   }
 
   if (url.pathname === "/api/uploads" && request.method === "POST") {
@@ -344,10 +507,14 @@ async function handleApi(request, response, url) {
     if (!match) return json(response, 400, { error: "Неверный формат файла." })
     const bytes = Buffer.from(match[2], "base64")
     if (bytes.length > 25 * 1024 * 1024) return json(response, 413, { error: "Файл больше 25 МБ." })
+    const usedBytes = database.uploads.filter((upload) => upload.userId === user.id).reduce((total, upload) => total + Number(upload.size || 0), 0)
+    if (usedBytes + bytes.length > 250 * 1024 * 1024) return json(response, 413, { error: "Хранилище аккаунта заполнено (лимит 250 МБ)." })
     const extensionByMime = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "video/webm": ".webm", "video/mp4": ".mp4", "application/pdf": ".pdf", "text/plain": ".txt", "application/zip": ".zip" }
     const extension = extensionByMime[match[1].toLowerCase()] || ".bin"
     const fileName = `${randomUUID()}${extension}`
     await writeFile(join(uploadsDir, fileName), bytes, { mode: 0o600 })
+    database.uploads.push({ id: randomUUID(), userId: user.id, fileName, url: `/uploads/${fileName}`, size: bytes.length, createdAt: Date.now() })
+    await persist()
     return json(response, 201, { url: `/uploads/${fileName}`, type: match[1], size: bytes.length })
   }
 
@@ -357,13 +524,15 @@ async function handleApi(request, response, url) {
     const clients = sseClients.get(user.id) || new Set()
     clients.add(response)
     sseClients.set(user.id, clients)
-    broadcast(database.users.map((item) => item.id), "presence.updated", { userId: user.id, username: `@${user.username}`, online: true })
+    broadcast(relatedUserIds(user.id), "presence.updated", { userId: user.id, username: `@${user.username}`, online: true })
     const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 20_000)
     request.on("close", () => {
       clearInterval(heartbeat)
       clients.delete(response)
-      if (!clients.size) sseClients.delete(user.id)
-      broadcast(database.users.map((item) => item.id), "presence.updated", { userId: user.id, username: `@${user.username}`, online: false })
+      if (!clients.size) {
+        sseClients.delete(user.id)
+        broadcast(relatedUserIds(user.id), "presence.updated", { userId: user.id, username: `@${user.username}`, online: false })
+      }
     })
     return
   }
@@ -381,9 +550,15 @@ async function serveFile(response, filePath, cache = true) {
 
 async function serveStatic(request, response, url) {
   if (url.pathname.startsWith("/uploads/")) {
-    if (!getSessionUser(request)) return json(response, 401, { error: "Нужно войти в аккаунт." })
+    const user = getSessionUser(request)
+    if (!user) return json(response, 401, { error: "Нужно войти в аккаунт." })
     const name = url.pathname.slice("/uploads/".length)
     if (!/^[a-f0-9-]+\.[a-z0-9]+$/i.test(name)) return json(response, 404, { error: "File not found" })
+    const upload = database.uploads.find((item) => item.fileName === name)
+    const urlPath = `/uploads/${name}`
+    const inProfile = database.users.some((item) => item.avatarUrl === urlPath)
+    const inConversation = database.messages.some((message) => message.mediaUrl === urlPath && database.conversations.some((conversation) => conversation.id === message.conversationId && conversation.participants.includes(user.id)))
+    if (!inProfile && !inConversation && upload?.userId !== user.id) return json(response, 404, { error: "File not found" })
     try { if (await serveFile(response, join(uploadsDir, name), false)) return } catch {}
     return json(response, 404, { error: "File not found" })
   }
@@ -403,13 +578,17 @@ async function initialize() {
   try {
     const parsed = JSON.parse(await readFile(databaseFile, "utf8"))
     if (![parsed.users, parsed.sessions, parsed.conversations, parsed.messages].every(Array.isArray)) throw new Error("Database has an invalid shape")
-    database = { ...emptyDatabase(), ...parsed, version: 2 }
+    database = { ...emptyDatabase(), ...parsed, version: 4 }
+    for (const user of database.users) user.blockedUserIds ||= []
+    for (const session of database.sessions) { session.createdAt ||= session.expiresAt - sessionMaxAge * 1000; session.lastSeenAt ||= session.createdAt; session.userAgent ||= "Неизвестное устройство"; session.ip ||= "" }
     for (const conversation of database.conversations) conversation.readAt ||= {}
+    for (const message of database.messages) { message.reactions ||= {}; message.editedAt ||= null; message.deletedAt ||= null; message.replyToId ||= null; message.clientId ||= "" }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error
     await persist()
   }
   database.sessions = database.sessions.filter((session) => session.expiresAt > Date.now())
+  await cleanupOrphanUploads()
 }
 
 await initialize()
@@ -431,4 +610,4 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => console.log(`Favourite Gram is listening on http://${host}:${port}`))
 
-for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => server.close(() => process.exit(0)))
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => server.close(() => process.exit(0)))
