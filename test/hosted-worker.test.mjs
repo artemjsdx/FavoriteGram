@@ -149,3 +149,28 @@ test("Sites Worker persists accounts, chats, polling events and R2 uploads", asy
   assert.equal((await bob.request(`/api/chats/${chatId}`, { method: "DELETE" })).response.status, 200);
   assert.equal((await bob.request("/api/chats")).data.chats.length, 0);
 });
+
+test("Sites Worker supports groups, privacy and WebRTC signaling state", async () => {
+  const env = { DB: new MockD1(), BUCKET: new MockR2() };
+  const owner = session(env);
+  const a = session(env);
+  const b = session(env);
+  await owner.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "owner", password: "owner-pass" }) });
+  await a.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "worker_a", password: "member-pass" }) });
+  await b.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "worker_b", password: "member-pass" }) });
+  assert.equal((await a.request("/api/me/privacy", { method: "PATCH", body: JSON.stringify({ discoverable: false }) })).data.privacy.discoverable, false);
+  assert.equal((await owner.request("/api/users?query=worker_a")).data.users.length, 0);
+  await a.request("/api/me/privacy", { method: "PATCH", body: JSON.stringify({ discoverable: true }) });
+
+  const direct = await owner.request("/api/chats", { method: "POST", body: JSON.stringify({ username: "worker_a" }) });
+  const group = await owner.request("/api/groups", { method: "POST", body: JSON.stringify({ name: "Worker group", usernames: ["worker_a", "worker_b"] }) });
+  assert.equal(group.data.chat.group, true);
+  assert.equal(group.data.chat.members.length, 3);
+
+  const call = await owner.request("/api/calls", { method: "POST", body: JSON.stringify({ conversationId: direct.data.chat.id, mode: "video", offer: { type: "offer", sdp: "worker-offer" } }) });
+  assert.equal(call.response.status, 201);
+  assert.equal((await a.request("/api/calls")).data.calls[0].role, "callee");
+  const answer = await a.request(`/api/calls/${call.data.call.id}`, { method: "PATCH", body: JSON.stringify({ answer: { type: "answer", sdp: "worker-answer" }, status: "active", candidate: { candidate: "candidate:1" } }) });
+  assert.equal(answer.data.call.status, "active");
+  assert.equal((await owner.request(`/api/calls/${call.data.call.id}`)).data.call.answer.sdp, "worker-answer");
+});

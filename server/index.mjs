@@ -45,7 +45,7 @@ const mimeTypes = {
   ".zip": "application/zip",
 }
 
-const emptyDatabase = () => ({ version: 4, users: [], sessions: [], conversations: [], messages: [], uploads: [] })
+const emptyDatabase = () => ({ version: 6, users: [], sessions: [], conversations: [], messages: [], uploads: [], reports: [], calls: [] })
 let database = emptyDatabase()
 
 const recoveryAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -73,8 +73,12 @@ function publicUser(user) {
     name: user.name,
     bio: user.bio,
     avatarUrl: user.avatarUrl || "",
-    online: Boolean(sseClients.get(user.id)?.size),
+    online: privacyFor(user).showOnline && Boolean(sseClients.get(user.id)?.size),
   }
+}
+
+function privacyFor(user) {
+  return { discoverable: user.privacy?.discoverable !== false, messagesFrom: ["everyone", "contacts", "nobody"].includes(user.privacy?.messagesFrom) ? user.privacy.messagesFrom : "everyone", showOnline: user.privacy?.showOnline !== false }
 }
 
 function json(response, status, body, headers = {}) {
@@ -193,11 +197,13 @@ function serializeMessage(message, currentUserId, conversation) {
 function serializeConversation(conversation, currentUserId, limit = 50) {
   const otherId = conversation.participants.find((id) => id !== currentUserId) || currentUserId
   const other = database.users.find((user) => user.id === otherId)
+  const members = conversation.participants.map((id) => database.users.find((user) => user.id === id)).filter(Boolean).map(publicUser)
+  const person = conversation.type === "group" ? { id: conversation.id, username: `@group_${conversation.id.slice(0, 8)}`, name: conversation.name || "Группа", bio: `${members.length} участников`, avatarUrl: "", online: false } : (other ? publicUser(other) : null)
   const allMessages = database.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt - b.createdAt)
   const messages = allMessages.slice(-limit)
   const readAt = Number(conversation.readAt?.[currentUserId] || 0)
   const unread = allMessages.filter((message) => message.senderId !== currentUserId && message.createdAt > readAt).length
-  return { id: conversation.id, person: other ? publicUser(other) : null, messages: messages.map((message) => serializeMessage(message, currentUserId, conversation)), unread, updatedAt: conversation.updatedAt, hasMore: allMessages.length > messages.length, oldestMessageAt: messages[0]?.createdAt || null }
+  return { id: conversation.id, person, group: conversation.type === "group", members, messages: messages.map((message) => serializeMessage(message, currentUserId, conversation)), unread, updatedAt: conversation.updatedAt, hasMore: allMessages.length > messages.length, oldestMessageAt: messages[0]?.createdAt || null, archived: conversation.archivedFor?.includes(currentUserId) || false, muted: conversation.mutedFor?.includes(currentUserId) || false, pinned: conversation.pinnedFor?.includes(currentUserId) || false, pinnedMessageIds: conversation.pinnedMessageIds || [] }
 }
 
 function broadcast(userIds, event, payload) {
@@ -286,6 +292,19 @@ async function handleApi(request, response, url) {
   if (!user) return json(response, 401, { error: "Нужно войти в аккаунт." })
 
   if (url.pathname === "/api/me" && request.method === "GET") return json(response, 200, { user: publicUser(user) })
+  if (url.pathname === "/api/me/privacy" && request.method === "GET") return json(response, 200, { privacy: privacyFor(user) })
+  if (url.pathname === "/api/me/privacy" && request.method === "PATCH") {
+    const body = await readBody(request)
+    const current = privacyFor(user)
+    user.privacy = {
+      discoverable: typeof body.discoverable === "boolean" ? body.discoverable : current.discoverable,
+      messagesFrom: ["everyone", "contacts", "nobody"].includes(body.messagesFrom) ? body.messagesFrom : current.messagesFrom,
+      showOnline: typeof body.showOnline === "boolean" ? body.showOnline : current.showOnline,
+    }
+    user.updatedAt = Date.now()
+    await persist()
+    return json(response, 200, { privacy: user.privacy })
+  }
   if (url.pathname === "/api/me" && request.method === "PATCH") {
     const body = await readBody(request)
     if (typeof body.name === "string") user.name = body.name.trim().slice(0, 48) || user.username
@@ -343,10 +362,16 @@ async function handleApi(request, response, url) {
   if (url.pathname === "/api/me" && request.method === "DELETE") {
     const body = await readBody(request)
     if (!(await verifyPassword(String(body.password || ""), user.passwordSalt, user.passwordHash))) return json(response, 403, { error: "Пароль указан неверно." })
-    const conversationIds = database.conversations.filter((conversation) => conversation.participants.includes(user.id)).map((conversation) => conversation.id)
+    const conversationIds = database.conversations.filter((conversation) => conversation.participants.includes(user.id) && conversation.type !== "group").map((conversation) => conversation.id)
+    const groupIds = database.conversations.filter((conversation) => conversation.participants.includes(user.id) && conversation.type === "group").map((conversation) => conversation.id)
     const ownedUploads = database.uploads.filter((upload) => upload.userId === user.id)
-    database.messages = database.messages.filter((message) => !conversationIds.includes(message.conversationId))
+    database.messages = database.messages.filter((message) => !conversationIds.includes(message.conversationId) && !(groupIds.includes(message.conversationId) && message.senderId === user.id))
     database.conversations = database.conversations.filter((conversation) => !conversationIds.includes(conversation.id))
+    for (const conversation of database.conversations.filter((item) => groupIds.includes(item.id))) {
+      conversation.participants = conversation.participants.filter((id) => id !== user.id)
+      if (conversation.createdBy === user.id) conversation.createdBy = conversation.participants[0]
+    }
+    database.conversations = database.conversations.filter((conversation) => conversation.type !== "group" || conversation.participants.length >= 2)
     database.sessions = database.sessions.filter((session) => session.userId !== user.id)
     database.uploads = database.uploads.filter((upload) => upload.userId !== user.id)
     database.users = database.users.filter((item) => item.id !== user.id).map((item) => ({ ...item, blockedUserIds: (item.blockedUserIds || []).filter((id) => id !== user.id) }))
@@ -367,10 +392,26 @@ async function handleApi(request, response, url) {
     return json(response, 200, { blocked: request.method === "POST" })
   }
 
+  if (url.pathname === "/api/blocked" && request.method === "GET") {
+    const blocked = (user.blockedUserIds || []).map((id) => database.users.find((item) => item.id === id)).filter(Boolean).map(publicUser)
+    return json(response, 200, { users: blocked })
+  }
+
   if (url.pathname === "/api/users" && request.method === "GET") {
     const query = normalizeUsername(url.searchParams.get("query"))
-    const users = query.length < 2 ? [] : database.users.filter((item) => item.id !== user.id && !(user.blockedUserIds || []).includes(item.id) && !(item.blockedUserIds || []).includes(user.id) && `${item.username} ${item.name}`.toLowerCase().includes(query)).slice(0, 20).map(publicUser)
+    const users = query.length < 2 ? [] : database.users.filter((item) => item.id !== user.id && privacyFor(item).discoverable && !(user.blockedUserIds || []).includes(item.id) && !(item.blockedUserIds || []).includes(user.id) && `${item.username} ${item.name}`.toLowerCase().includes(query)).slice(0, 20).map(publicUser)
     return json(response, 200, { users })
+  }
+
+  if (url.pathname === "/api/messages/search" && request.method === "GET") {
+    const query = String(url.searchParams.get("query") || "").trim().toLowerCase()
+    if (query.length < 2) return json(response, 200, { results: [] })
+    const allowed = new Set(database.conversations.filter((conversation) => conversation.participants.includes(user.id) && !conversation.hiddenFor?.includes(user.id)).map((conversation) => conversation.id))
+    const results = database.messages.filter((message) => allowed.has(message.conversationId) && !message.deletedAt && `${message.body || ""} ${message.fileName || ""}`.toLowerCase().includes(query)).sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map((message) => {
+      const conversation = database.conversations.find((item) => item.id === message.conversationId)
+      return { conversationId: message.conversationId, message: serializeMessage(message, user.id, conversation), chat: serializeConversation(conversation, user.id, 1) }
+    })
+    return json(response, 200, { results })
   }
 
   if (url.pathname === "/api/chats" && request.method === "GET") {
@@ -385,10 +426,90 @@ async function handleApi(request, response, url) {
     if ((user.blockedUserIds || []).includes(target.id) || (target.blockedUserIds || []).includes(user.id)) return json(response, 403, { error: "Диалог недоступен из-за блокировки." })
     let conversation = database.conversations.find((item) => item.participants.length === 2 && item.participants.includes(user.id) && item.participants.includes(target.id))
     if (!conversation) {
-      conversation = { id: randomUUID(), participants: [user.id, target.id], hiddenFor: [], readAt: { [user.id]: Date.now(), [target.id]: 0 }, createdAt: Date.now(), updatedAt: Date.now() }
+      const targetPrivacy = privacyFor(target)
+      const existingContact = database.conversations.some((item) => item.participants.includes(user.id) && item.participants.includes(target.id))
+      if (targetPrivacy.messagesFrom === "nobody" || (targetPrivacy.messagesFrom === "contacts" && !existingContact)) return json(response, 403, { error: "Пользователь ограничил новые сообщения." })
+      conversation = { id: randomUUID(), participants: [user.id, target.id], hiddenFor: [], archivedFor: [], mutedFor: [], pinnedFor: [], pinnedMessageIds: [], readAt: { [user.id]: Date.now(), [target.id]: 0 }, createdAt: Date.now(), updatedAt: Date.now() }
       database.conversations.push(conversation)
     } else conversation.hiddenFor = (conversation.hiddenFor || []).filter((id) => id !== user.id)
     await persist()
+    return json(response, 200, { chat: serializeConversation(conversation, user.id) })
+  }
+
+  if (url.pathname === "/api/groups" && request.method === "POST") {
+    const body = await readBody(request)
+    const name = String(body.name || "").trim().slice(0, 64)
+    const usernames = [...new Set((Array.isArray(body.usernames) ? body.usernames : []).map(normalizeUsername).filter(Boolean))]
+    if (name.length < 2) return json(response, 400, { error: "Название группы должно содержать минимум 2 символа." })
+    const invited = usernames.map((username) => database.users.find((item) => item.username === username)).filter(Boolean).filter((item) => item.id !== user.id)
+    if (invited.length < 2 || invited.length !== usernames.filter((username) => username !== user.username).length) return json(response, 400, { error: "Добавьте минимум двух существующих пользователей." })
+    if (invited.length > 99) return json(response, 400, { error: "В группе может быть не больше 100 участников." })
+    if (invited.some((item) => (user.blockedUserIds || []).includes(item.id) || (item.blockedUserIds || []).includes(user.id))) return json(response, 403, { error: "Нельзя добавить заблокированного пользователя." })
+    const participants = [user.id, ...invited.map((item) => item.id)]
+    const now = Date.now()
+    const conversation = { id: randomUUID(), type: "group", name, createdBy: user.id, participants, hiddenFor: [], archivedFor: [], mutedFor: [], pinnedFor: [], pinnedMessageIds: [], readAt: Object.fromEntries(participants.map((id) => [id, id === user.id ? now : 0])), createdAt: now, updatedAt: now }
+    database.conversations.push(conversation)
+    await persist()
+    broadcast(participants.filter((id) => id !== user.id), "refresh", { conversationId: conversation.id })
+    return json(response, 201, { chat: serializeConversation(conversation, user.id) })
+  }
+
+  if (url.pathname === "/api/calls" && request.method === "GET") {
+    const now = Date.now()
+    database.calls = database.calls.filter((call) => call.expiresAt > now)
+    const calls = database.calls.filter((call) => call.participants.includes(user.id) && !["ended", "declined"].includes(call.status)).map((call) => ({ ...call, role: call.callerId === user.id ? "caller" : "callee" }))
+    return json(response, 200, { calls })
+  }
+
+  if (url.pathname === "/api/calls" && request.method === "POST") {
+    const body = await readBody(request)
+    const conversation = getConversationForUser(String(body.conversationId || ""), user.id)
+    if (!conversation || conversation.participants.length !== 2) return json(response, 400, { error: "Звонки доступны только в личных чатах." })
+    const now = Date.now()
+    const call = { id: randomUUID(), conversationId: conversation.id, callerId: user.id, participants: [...conversation.participants], mode: body.mode === "video" ? "video" : "audio", status: "ringing", offer: body.offer || null, answer: null, candidates: {}, createdAt: now, updatedAt: now, expiresAt: now + 5 * 60_000 }
+    database.calls.push(call)
+    await persist()
+    broadcast(conversation.participants.filter((id) => id !== user.id), "call.updated", { call })
+    return json(response, 201, { call: { ...call, role: "caller" } })
+  }
+
+  const callMatch = url.pathname.match(/^\/api\/calls\/([^/]+)$/)
+  if (callMatch && (request.method === "GET" || request.method === "PATCH")) {
+    const call = database.calls.find((item) => item.id === callMatch[1] && item.participants.includes(user.id))
+    if (!call) return json(response, 404, { error: "Звонок не найден." })
+    if (request.method === "GET") return json(response, 200, { call: { ...call, role: call.callerId === user.id ? "caller" : "callee" } })
+    const body = await readBody(request)
+    if (body.offer && call.callerId === user.id) call.offer = body.offer
+    if (body.answer && call.callerId !== user.id) call.answer = body.answer
+    if (body.candidate) {
+      call.candidates ||= {}
+      call.candidates[user.id] ||= []
+      if (call.candidates[user.id].length < 128) call.candidates[user.id].push(body.candidate)
+    }
+    if (["active", "declined", "ended"].includes(body.status)) call.status = body.status
+    call.updatedAt = Date.now()
+    call.expiresAt = call.status === "active" ? Date.now() + 2 * 60 * 60_000 : Math.min(call.expiresAt, Date.now() + 5 * 60_000)
+    await persist()
+    broadcast(call.participants.filter((id) => id !== user.id), "call.updated", { call })
+    return json(response, 200, { call: { ...call, role: call.callerId === user.id ? "caller" : "callee" } })
+  }
+
+  const groupMatch = url.pathname.match(/^\/api\/groups\/([^/]+)$/)
+  if (groupMatch && request.method === "PATCH") {
+    const conversation = getConversationForUser(groupMatch[1], user.id)
+    if (!conversation || conversation.type !== "group") return json(response, 404, { error: "Группа не найдена." })
+    if (conversation.createdBy !== user.id) return json(response, 403, { error: "Изменять группу может только создатель." })
+    const body = await readBody(request)
+    if (typeof body.name === "string") conversation.name = body.name.trim().slice(0, 64) || conversation.name
+    if (Array.isArray(body.usernames)) {
+      const invited = [...new Set(body.usernames.map(normalizeUsername))].map((username) => database.users.find((item) => item.username === username)).filter(Boolean).filter((item) => item.id !== user.id)
+      if (invited.length < 2) return json(response, 400, { error: "В группе должно остаться минимум три участника." })
+      if (invited.some((item) => (user.blockedUserIds || []).includes(item.id) || (item.blockedUserIds || []).includes(user.id))) return json(response, 403, { error: "Нельзя добавить заблокированного пользователя." })
+      conversation.participants = [user.id, ...invited.map((item) => item.id)].slice(0, 100)
+    }
+    conversation.updatedAt = Date.now()
+    await persist()
+    broadcast(conversation.participants, "refresh", { conversationId: conversation.id })
     return json(response, 200, { chat: serializeConversation(conversation, user.id) })
   }
 
@@ -399,6 +520,21 @@ async function handleApi(request, response, url) {
     conversation.hiddenFor = [...new Set([...(conversation.hiddenFor || []), user.id])]
     await persist()
     return json(response, 200, { ok: true })
+  }
+
+  const preferenceMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/preferences$/)
+  if (preferenceMatch && request.method === "PATCH") {
+    const conversation = getConversationForUser(preferenceMatch[1], user.id)
+    if (!conversation) return json(response, 404, { error: "Чат не найден." })
+    const body = await readBody(request)
+    for (const [field, list] of [["archived", "archivedFor"], ["muted", "mutedFor"], ["pinned", "pinnedFor"]]) {
+      if (typeof body[field] !== "boolean") continue
+      const values = new Set(conversation[list] || [])
+      if (body[field]) values.add(user.id); else values.delete(user.id)
+      conversation[list] = [...values]
+    }
+    await persist()
+    return json(response, 200, { chat: serializeConversation(conversation, user.id) })
   }
 
   const readMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/read$/)
@@ -434,9 +570,8 @@ async function handleApi(request, response, url) {
   if (messageMatch && request.method === "POST") {
     const conversation = getConversationForUser(messageMatch[1], user.id)
     if (!conversation) return json(response, 404, { error: "Чат не найден." })
-    const otherId = conversation.participants.find((id) => id !== user.id)
-    const other = database.users.find((item) => item.id === otherId)
-    if ((user.blockedUserIds || []).includes(otherId) || (other?.blockedUserIds || []).includes(user.id)) return json(response, 403, { error: "Сообщения недоступны из-за блокировки." })
+    const others = conversation.participants.filter((id) => id !== user.id).map((id) => database.users.find((item) => item.id === id)).filter(Boolean)
+    if (others.some((other) => (user.blockedUserIds || []).includes(other.id) || (other.blockedUserIds || []).includes(user.id))) return json(response, 403, { error: "Сообщения недоступны из-за блокировки." })
     const body = await readBody(request)
     const kind = ["text", "voice", "video", "file"].includes(body.kind) ? body.kind : "text"
     const text = String(body.body || "").trim().slice(0, 4000)
@@ -499,6 +634,45 @@ async function handleApi(request, response, url) {
     await persist()
     broadcastConversation(conversation, "message.updated", message)
     return json(response, 200, { message: serializeMessage(message, user.id, conversation) })
+  }
+
+  const pinMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/pin$/)
+  if (pinMatch && (request.method === "POST" || request.method === "DELETE")) {
+    const conversation = getConversationForUser(pinMatch[1], user.id)
+    const message = conversation && database.messages.find((item) => item.id === pinMatch[2] && item.conversationId === conversation.id)
+    if (!conversation || !message) return json(response, 404, { error: "Сообщение не найдено." })
+    const pinned = new Set(conversation.pinnedMessageIds || [])
+    if (request.method === "POST") pinned.add(message.id); else pinned.delete(message.id)
+    conversation.pinnedMessageIds = [...pinned]
+    await persist()
+    return json(response, 200, { pinned: request.method === "POST", pinnedMessageIds: conversation.pinnedMessageIds })
+  }
+
+  const forwardMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/forward$/)
+  if (forwardMatch && request.method === "POST") {
+    const sourceConversation = getConversationForUser(forwardMatch[1], user.id)
+    const source = sourceConversation && database.messages.find((item) => item.id === forwardMatch[2] && item.conversationId === sourceConversation.id && !item.deletedAt)
+    if (!sourceConversation || !source) return json(response, 404, { error: "Сообщение не найдено." })
+    const body = await readBody(request)
+    const target = getConversationForUser(String(body.conversationId || ""), user.id)
+    if (!target) return json(response, 404, { error: "Чат для пересылки не найден." })
+    const message = { ...source, id: randomUUID(), clientId: String(body.clientId || "").slice(0, 80), conversationId: target.id, senderId: user.id, replyToId: null, reactions: {}, createdAt: Date.now(), editedAt: null, deletedAt: null, forwardedFrom: source.senderId }
+    database.messages.push(message)
+    target.updatedAt = message.createdAt
+    target.hiddenFor = []
+    target.readAt = { ...(target.readAt || {}), [user.id]: message.createdAt }
+    await persist()
+    broadcastConversation(target, "message.created", message)
+    return json(response, 201, { message: serializeMessage(message, user.id, target), chat: serializeConversation(target, user.id) })
+  }
+
+  if (url.pathname === "/api/reports" && request.method === "POST") {
+    const body = await readBody(request)
+    const target = database.users.find((item) => item.username === normalizeUsername(body.username))
+    if (!target || target.id === user.id) return json(response, 404, { error: "Пользователь не найден." })
+    database.reports.push({ id: randomUUID(), reporterId: user.id, targetUserId: target.id, messageId: String(body.messageId || "").slice(0, 80), reason: String(body.reason || "Другое").trim().slice(0, 500), createdAt: Date.now(), status: "new" })
+    await persist()
+    return json(response, 201, { ok: true })
   }
 
   if (url.pathname === "/api/uploads" && request.method === "POST") {
@@ -578,10 +752,10 @@ async function initialize() {
   try {
     const parsed = JSON.parse(await readFile(databaseFile, "utf8"))
     if (![parsed.users, parsed.sessions, parsed.conversations, parsed.messages].every(Array.isArray)) throw new Error("Database has an invalid shape")
-    database = { ...emptyDatabase(), ...parsed, version: 4 }
-    for (const user of database.users) user.blockedUserIds ||= []
+    database = { ...emptyDatabase(), ...parsed, version: 6 }
+    for (const user of database.users) { user.blockedUserIds ||= []; user.privacy = privacyFor(user) }
     for (const session of database.sessions) { session.createdAt ||= session.expiresAt - sessionMaxAge * 1000; session.lastSeenAt ||= session.createdAt; session.userAgent ||= "Неизвестное устройство"; session.ip ||= "" }
-    for (const conversation of database.conversations) conversation.readAt ||= {}
+    for (const conversation of database.conversations) { conversation.readAt ||= {}; conversation.archivedFor ||= []; conversation.mutedFor ||= []; conversation.pinnedFor ||= []; conversation.pinnedMessageIds ||= [] }
     for (const message of database.messages) { message.reactions ||= {}; message.editedAt ||= null; message.deletedAt ||= null; message.replyToId ||= null; message.clientId ||= "" }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error

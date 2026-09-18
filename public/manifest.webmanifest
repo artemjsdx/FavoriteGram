@@ -1,0 +1,13 @@
+{
+  "name": "FavouriteGram",
+  "short_name": "FavouriteGram",
+  "description": "Личные чаты, голосовые сообщения и кружочки прямо в браузере.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#050506",
+  "theme_color": "#050506",
+  "lang": "ru",
+  "categories": ["social", "communication"],
+  "icons": [{ "src": "/favourite-gram-icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" }]
+}

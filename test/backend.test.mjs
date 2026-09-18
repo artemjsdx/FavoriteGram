@@ -175,3 +175,44 @@ test("accounts, profiles, chats, uploads, unread state, persistence and recovery
   const persistedChats = await afterRestart.request("/api/chats")
   assert.equal(persistedChats.data.chats[0].messages.length, 3)
 })
+
+test("privacy, chat preferences, groups, search, forwarding, pinning, reports and call signaling", async () => {
+  const owner = session()
+  const memberA = session()
+  const memberB = session()
+  await owner.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "group_owner", password: "owner-pass" }) })
+  await memberA.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "member_a", password: "member-pass" }) })
+  await memberB.request("/api/auth/register", { method: "POST", body: JSON.stringify({ username: "member_b", password: "member-pass" }) })
+
+  const privacy = await memberA.request("/api/me/privacy", { method: "PATCH", body: JSON.stringify({ discoverable: false, showOnline: false, messagesFrom: "contacts" }) })
+  assert.equal(privacy.data.privacy.discoverable, false)
+  assert.equal((await owner.request("/api/users?query=member_a")).data.users.length, 0)
+  await memberA.request("/api/me/privacy", { method: "PATCH", body: JSON.stringify({ discoverable: true, messagesFrom: "everyone" }) })
+
+  const direct = await owner.request("/api/chats", { method: "POST", body: JSON.stringify({ username: "member_a" }) })
+  const directId = direct.data.chat.id
+  const sent = await owner.request(`/api/chats/${directId}/messages`, { method: "POST", body: JSON.stringify({ kind: "text", body: "уникальный поисковый текст" }) })
+  assert.equal((await owner.request("/api/messages/search?query=поисковый")).data.results.length, 1)
+  assert.equal((await owner.request(`/api/chats/${directId}/preferences`, { method: "PATCH", body: JSON.stringify({ pinned: true, muted: true, archived: true }) })).data.chat.archived, true)
+  assert.equal((await owner.request(`/api/chats/${directId}/messages/${sent.data.message.id}/pin`, { method: "POST", body: "{}" })).data.pinned, true)
+
+  const second = await owner.request("/api/chats", { method: "POST", body: JSON.stringify({ username: "member_b" }) })
+  const forwarded = await owner.request(`/api/chats/${directId}/messages/${sent.data.message.id}/forward`, { method: "POST", body: JSON.stringify({ conversationId: second.data.chat.id }) })
+  assert.equal(forwarded.response.status, 201)
+  assert.equal(forwarded.data.message.body, "уникальный поисковый текст")
+
+  const group = await owner.request("/api/groups", { method: "POST", body: JSON.stringify({ name: "Тестовая группа", usernames: ["member_a", "member_b"] }) })
+  assert.equal(group.response.status, 201)
+  assert.equal(group.data.chat.group, true)
+  assert.equal(group.data.chat.members.length, 3)
+  assert.equal((await memberB.request("/api/chats")).data.chats.some((chat) => chat.id === group.data.chat.id), true)
+
+  const call = await owner.request("/api/calls", { method: "POST", body: JSON.stringify({ conversationId: directId, mode: "audio", offer: { type: "offer", sdp: "test-offer" } }) })
+  assert.equal(call.response.status, 201)
+  const incoming = await memberA.request("/api/calls")
+  assert.equal(incoming.data.calls[0].role, "callee")
+  const answered = await memberA.request(`/api/calls/${call.data.call.id}`, { method: "PATCH", body: JSON.stringify({ answer: { type: "answer", sdp: "test-answer" }, status: "active" }) })
+  assert.equal(answered.data.call.status, "active")
+  assert.equal((await owner.request(`/api/calls/${call.data.call.id}`)).data.call.answer.sdp, "test-answer")
+  assert.equal((await owner.request("/api/reports", { method: "POST", body: JSON.stringify({ username: "member_a", messageId: sent.data.message.id, reason: "Тест" }) })).response.status, 201)
+})
