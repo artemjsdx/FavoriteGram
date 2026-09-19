@@ -66,6 +66,14 @@ function normalizeUsername(value) {
   return String(value || "").trim().replace(/^@/, "").toLowerCase()
 }
 
+function normalizeReactionEmoji(value) {
+  const emoji = String(value || "").trim()
+  if (!emoji || emoji.length > 24) return ""
+  const segments = [...new Intl.Segmenter("und", { granularity: "grapheme" }).segment(emoji)]
+  if (segments.length !== 1) return ""
+  return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(emoji) ? emoji : ""
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -79,6 +87,24 @@ function publicUser(user) {
 
 function privacyFor(user) {
   return { discoverable: user.privacy?.discoverable !== false, messagesFrom: ["everyone", "contacts", "nobody"].includes(user.privacy?.messagesFrom) ? user.privacy.messagesFrom : "everyone", showOnline: user.privacy?.showOnline !== false }
+}
+
+function appearanceFor(user) {
+  const value = user.appearance || {}
+  return {
+    accent: ["sand", "violet", "ocean", "rose", "lime", "custom"].includes(value.accent) ? value.accent : "violet",
+    customAccent: /^#[0-9a-f]{6}$/i.test(value.customAccent || "") ? value.customAccent : "#8b76ff",
+    bubbleShape: ["soft", "round", "compact"].includes(value.bubbleShape) ? value.bubbleShape : "soft",
+    bubbleOutline: ["none", "subtle", "accent"].includes(value.bubbleOutline) ? value.bubbleOutline : "subtle",
+    compact: Boolean(value.compact),
+    backdrop: ["quiet", "aurora", "grain", "none"].includes(value.backdrop) ? value.backdrop : "quiet",
+    motion: ["full", "calm", "off"].includes(value.motion) ? value.motion : "full",
+  }
+}
+
+function notificationSettingsFor(user) {
+  const value = user.notificationSettings || {}
+  return Object.fromEntries(["enabled", "directMessages", "groupMessages", "calls", "reactions", "previews", "sound", "vibration"].map((key) => [key, value[key] !== false]).concat([["quietHours", Boolean(value.quietHours)]]))
 }
 
 function json(response, status, body, headers = {}) {
@@ -292,6 +318,15 @@ async function handleApi(request, response, url) {
   if (!user) return json(response, 401, { error: "Нужно войти в аккаунт." })
 
   if (url.pathname === "/api/me" && request.method === "GET") return json(response, 200, { user: publicUser(user) })
+  if (url.pathname === "/api/me/preferences" && request.method === "GET") return json(response, 200, { appearance: appearanceFor(user), notifications: notificationSettingsFor(user) })
+  if (url.pathname === "/api/me/preferences" && request.method === "PATCH") {
+    const body = await readBody(request)
+    if (body.appearance && typeof body.appearance === "object") user.appearance = appearanceFor({ appearance: { ...appearanceFor(user), ...body.appearance } })
+    if (body.notifications && typeof body.notifications === "object") user.notificationSettings = notificationSettingsFor({ notificationSettings: { ...notificationSettingsFor(user), ...body.notifications } })
+    user.updatedAt = Date.now()
+    await persist()
+    return json(response, 200, { appearance: appearanceFor(user), notifications: notificationSettingsFor(user) })
+  }
   if (url.pathname === "/api/me/privacy" && request.method === "GET") return json(response, 200, { privacy: privacyFor(user) })
   if (url.pathname === "/api/me/privacy" && request.method === "PATCH") {
     const body = await readBody(request)
@@ -625,12 +660,13 @@ async function handleApi(request, response, url) {
     if (!conversation || !message) return json(response, 404, { error: "Сообщение не найдено." })
     if (message.deletedAt) return json(response, 400, { error: "Удалённое сообщение нельзя оценить." })
     const body = await readBody(request)
-    const emoji = String(body.emoji || "")
-    if (!["👍", "❤️", "😂", "🔥", "👏", "😮"].includes(emoji)) return json(response, 400, { error: "Эта реакция не поддерживается." })
+    const emoji = normalizeReactionEmoji(body.emoji)
+    if (!emoji) return json(response, 400, { error: "Выберите один эмодзи для реакции." })
     message.reactions ||= {}
+    if (!(emoji in message.reactions) && Object.values(message.reactions).filter((users) => users.length > 0).length >= 32) return json(response, 400, { error: "Для одного сообщения доступно до 32 разных реакций." })
     const users = new Set(message.reactions[emoji] || [])
     if (users.has(user.id)) users.delete(user.id); else users.add(user.id)
-    message.reactions[emoji] = [...users]
+    if (users.size) message.reactions[emoji] = [...users]; else delete message.reactions[emoji]
     await persist()
     broadcastConversation(conversation, "message.updated", message)
     return json(response, 200, { message: serializeMessage(message, user.id, conversation) })
@@ -753,7 +789,7 @@ async function initialize() {
     const parsed = JSON.parse(await readFile(databaseFile, "utf8"))
     if (![parsed.users, parsed.sessions, parsed.conversations, parsed.messages].every(Array.isArray)) throw new Error("Database has an invalid shape")
     database = { ...emptyDatabase(), ...parsed, version: 6 }
-    for (const user of database.users) { user.blockedUserIds ||= []; user.privacy = privacyFor(user) }
+    for (const user of database.users) { user.blockedUserIds ||= []; user.privacy = privacyFor(user); user.appearance = appearanceFor(user); user.notificationSettings = notificationSettingsFor(user) }
     for (const session of database.sessions) { session.createdAt ||= session.expiresAt - sessionMaxAge * 1000; session.lastSeenAt ||= session.createdAt; session.userAgent ||= "Неизвестное устройство"; session.ip ||= "" }
     for (const conversation of database.conversations) { conversation.readAt ||= {}; conversation.archivedFor ||= []; conversation.mutedFor ||= []; conversation.pinnedFor ||= []; conversation.pinnedMessageIds ||= [] }
     for (const message of database.messages) { message.reactions ||= {}; message.editedAt ||= null; message.deletedAt ||= null; message.replyToId ||= null; message.clientId ||= "" }

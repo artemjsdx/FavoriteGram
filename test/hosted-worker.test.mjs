@@ -83,6 +83,12 @@ test("Sites Worker persists accounts, chats, polling events and D1 uploads", asy
 
   const profile = await alice.request("/api/me", { method: "PATCH", body: JSON.stringify({ name: "Алиса", bio: "Hosted backend" }) });
   assert.equal(profile.data.user.name, "Алиса");
+  const savedPreferences = await alice.request("/api/me/preferences", { method: "PATCH", body: JSON.stringify({ appearance: { accent: "rose", bubbleOutline: "accent" }, notifications: { vibration: false, quietHours: true } }) });
+  assert.equal(savedPreferences.response.status, 200);
+  assert.equal(savedPreferences.data.appearance.accent, "rose");
+  assert.equal(savedPreferences.data.appearance.bubbleOutline, "accent");
+  assert.equal(savedPreferences.data.notifications.vibration, false);
+  assert.equal((await alice.request("/api/me/preferences")).data.notifications.quietHours, true);
   assert.deepEqual((await bob.request("/api/users?query=ali")).data.users.map((user) => user.username), ["@hosted_alice"]);
 
   const created = await alice.request("/api/chats", { method: "POST", body: JSON.stringify({ username: "hosted_bob" }) });
@@ -106,6 +112,11 @@ test("Sites Worker persists accounts, chats, polling events and D1 uploads", asy
   const reacted = await alice.request(`/api/chats/${chatId}/messages/${reply.data.message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji: "🔥" }) });
   assert.equal(reacted.data.message.reactions[0].count, 1);
   assert.equal(reacted.data.message.reactions[0].reactedByMe, true);
+  const customReaction = await alice.request(`/api/chats/${chatId}/messages/${reply.data.message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji: "🧠" }) });
+  assert.equal(customReaction.response.status, 200);
+  assert.ok(customReaction.data.message.reactions.some((reaction) => reaction.emoji === "🧠" && reaction.reactedByMe));
+  const invalidReaction = await alice.request(`/api/chats/${chatId}/messages/${reply.data.message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji: "🔥👍" }) });
+  assert.equal(invalidReaction.response.status, 400);
   const page = await alice.request(`/api/chats/${chatId}/messages?limit=1`);
   assert.equal(page.data.messages.length, 1);
   assert.equal(page.data.hasMore, true);

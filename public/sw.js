@@ -1,4 +1,4 @@
-const CACHE = "favouritegram-shell-v1"
+const CACHE = "favouritegram-shell-v3"
 const SHELL = ["/", "/offline.html", "/manifest.webmanifest", "/favourite-gram-icon.png"]
 
 self.addEventListener("install", (event) => {
